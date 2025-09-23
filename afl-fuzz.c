@@ -2848,7 +2848,14 @@ static u8 run_target(char** argv, u32 timeout) {
 
 #ifdef INTELPT
 	if (use_intelpt) {
-		return run_target_pt(argv, timeout);
+    int result;
+    long fsize;
+
+    char *buf = get_test_case(&fsize);
+		// return run_target_pt(argv, timeout, drattach_identifier);
+    result = run_target_pt(argv, timeout, buf, fsize);
+    free(buf);
+    return result;
 	}
 #endif
 
@@ -8191,7 +8198,6 @@ int main(int argc, char** argv) {
   dynamorio_dir = NULL;
   client_params = NULL;
   winafl_dll_path = NULL;
-
   while ((opt = getopt(argc, argv, "+i:o:f:m:t:I:T:sdyYnCB:S:M:x:QD:b:l:pPc:w:A:eV")) > 0)
 
     switch (opt) {
@@ -8517,9 +8523,9 @@ int main(int argc, char** argv) {
     FATAL("AFL_DUMB_FORKSRV and AFL_NO_FORKSRV are mutually exclusive");
 
   save_cmdline(argc, argv);
-
-  fix_up_banner(argv[optind]);
-
+  if (!use_intelpt) 
+    fix_up_banner(argv[optind]);
+    
   check_if_tty();
 
   get_core_count();
@@ -8567,17 +8573,19 @@ int main(int argc, char** argv) {
 
   if (!timeout_given) find_timeout();
 
-  detect_file_args(argv + optind + 1);
+  if (!use_intelpt) 
+    detect_file_args(argv + optind + 1);
 
   if (!out_file) setup_stdio_file();
 
-  check_binary(argv[optind]);
+  if (!use_intelpt) 
+    check_binary(argv[optind]);
 
   start_time = get_cur_time();
 
   if (qemu_mode)
     use_argv = get_qemu_argv(argv[0], argv + optind, argc - optind);
-  else
+  else if (!use_intelpt) 
     use_argv = argv + optind;
 
   perform_dry_run(use_argv);

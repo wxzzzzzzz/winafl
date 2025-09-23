@@ -17,7 +17,7 @@
   See the License for the specific language governing permissions and
   limitations under the License.
 */
-
+// #include "types.h"
 #define COVERAGE_BB 0
 #define COVERAGE_EDGE 1
 
@@ -28,6 +28,7 @@
 
 bool findpsb(unsigned char **data, size_t *size);
 
-int run_target_pt(char **argv, uint32_t timeout);
+//int run_target_pt(char **argv, uint32_t timeout, char *drattach_identifier);
+int run_target_pt(char **argv, uint32_t timeout, char *buf, long fsize);
 int pt_init(int argc, char **argv, char *module_dir);
 void debug_target_pt(char **argv);

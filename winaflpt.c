@@ -18,14 +18,16 @@
   limitations under the License.
 */
 
+#include <sys/stat.h>
 #define  _CRT_SECURE_NO_WARNINGS
 
 #include <stdio.h>
 #include <stdbool.h>
+
 #include "windows.h"
 #include "psapi.h"
 #include "dbghelp.h"
-
+#include <tlhelp32.h>
 #include "libipt.h"
 #include "ipttool.h"
 
@@ -66,6 +68,7 @@ char *argv_to_cmd(char** argv);
 #define DEBUGGER_FUZZMETHOD_END 2
 #define DEBUGGER_CRASHED 3
 #define DEBUGGER_HANGED 4
+#define DEBUGGER_ATTACH 5
 
 #define DECODER_TIP_FAST 0
 #define DECODER_TIP_REFERENCE 1
@@ -82,6 +85,12 @@ static DEBUG_EVENT dbg_debug_event;
 static DWORD dbg_continue_status;
 static bool dbg_continue_needed;
 static uint64_t dbg_timeout_time;
+
+static u8 attach;
+static u32 attachpid;
+static u8 set_bp;
+static char *input_buf;
+static long input_length;
 
 static bool child_entrypoint_reached;
 
@@ -100,6 +109,9 @@ extern u64 mem_limit;
 extern u64 cpu_aff;
 
 extern char *fuzzer_id;
+
+// extern u8 drattach;
+// extern char *drattach_identifier;
 
 static FILE *debug_log = NULL;
 
@@ -167,6 +179,67 @@ struct winafl_breakpoint {
 	struct winafl_breakpoint *next;
 };
 struct winafl_breakpoint *breakpoints;
+
+//Define the function prototypes
+typedef int (APIENTRY* dll_run)(char*, long, int);
+typedef int (APIENTRY* dll_init)();
+typedef u8 (APIENTRY* dll_run_target)(char**, u32, char*, u32);
+typedef void (APIENTRY *dll_write_to_testcase)(char*, s32, const void*, u32);
+typedef u8 (APIENTRY* dll_mutate_testcase)(char**, u8*, u32, u8 (*)(char **, u8*, u32));
+typedef u8 (APIENTRY* dll_trim_testcase)(u32*, u32, u8*, u8*, void (*)(void*, u32), u8 (*)(char**, u32), char**, u32);
+
+// Parameters: argv, in_buf, buffer_length, mutation_iterations, common_fuzz_stuff
+typedef u8 (APIENTRY* dll_mutate_testcase_with_energy)(char**, u8*, u32, u32, u8 (*)(char **, u8*, u32));
+
+// custom server functions
+static dll_run dll_run_ptr = NULL;
+static dll_init dll_init_ptr = NULL;
+static dll_run_target dll_run_target_ptr = NULL;
+static dll_write_to_testcase dll_write_to_testcase_ptr = NULL;
+static dll_mutate_testcase dll_mutate_testcase_ptr = NULL;
+static dll_trim_testcase dll_trim_testcase_ptr = NULL;
+static dll_mutate_testcase_with_energy dll_mutate_testcase_with_energy_ptr = NULL;
+
+/* This routine is designed to load user-defined library for custom test cases processing */
+static void load_custom_library(const char *libname)
+{
+  int result = 0;
+  SAYF("Loading custom winAFL server library\n");
+  HMODULE hLib = LoadLibraryEx(libname, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+  if (hLib == NULL)
+    FATAL("Unable to load custom server library, GetLastError = 0x%x", GetLastError());
+
+  /* init the custom server */
+  // Get pointer to user-defined server initialization function using GetProcAddress:
+  dll_init_ptr = (dll_init)GetProcAddress(hLib, "dll_init");
+  SAYF("dll_init %s defined.\n", dll_init_ptr ? "is" : "isn't");
+
+  // Get pointer to user-defined test cases sending function using GetProcAddress:
+  dll_run_ptr = (dll_run)GetProcAddress(hLib, "dll_run");
+  SAYF("dll_run_ptr %s defined.\n", dll_run_ptr ? "is" : "isn't");
+
+  // Get pointer to user-defined run_target function using GetProcAddress:
+  dll_run_target_ptr = (dll_run_target)GetProcAddress(hLib, "dll_run_target");
+  SAYF("dll_run_target %s defined.\n", dll_run_target_ptr ? "is" : "isn't");
+
+  // Get pointer to user-defined write_to_testcase function using GetProcAddress:
+  dll_write_to_testcase_ptr = (dll_write_to_testcase)GetProcAddress(hLib, "dll_write_to_testcase");
+  SAYF("dll_write_to_testcase %s defined.\n", dll_write_to_testcase_ptr ? "is" : "isn't");
+
+  // Get pointer to user-defined mutate_testcase function using GetProcAddress:
+  dll_mutate_testcase_ptr = (dll_mutate_testcase)GetProcAddress(hLib, "dll_mutate_testcase");
+  SAYF("dll_mutate_testcase %s defined.\n", dll_mutate_testcase_ptr ? "is" : "isn't");
+
+  // Get pointer to user-defined trim_testcase function using GetProcAddress:
+  dll_trim_testcase_ptr = (dll_trim_testcase)GetProcAddress(hLib, "dll_trim_testcase");
+  SAYF("dll_trim_testcase %s defined.\n", dll_mutate_testcase_ptr ? "is" : "isn't");
+
+  // Get pointer to user-defined dll_mutate_testcase_with_energy_ptr function using GetProcAddress:
+  dll_mutate_testcase_with_energy_ptr = (dll_mutate_testcase_with_energy)GetProcAddress(hLib, "dll_mutate_testcase_with_energy");
+  SAYF("dll_mutate_testcase_with_energy %s defined.\n", dll_mutate_testcase_with_energy_ptr ? "is" : "isn't");
+
+  SAYF("Sucessfully loaded and initalized\n");
+}
 
 static void
 winaflpt_options_init(int argc, const char *argv[])
@@ -270,7 +343,19 @@ winaflpt_options_init(int argc, const char *argv[])
 				options.decoder = DECODER_FULL_REFERENCE;
 			else
 				FATAL("Unknown decoder value");
-		} else {
+		} else if (strcmp(token, "-attach") == 0) {
+			USAGE_CHECK((i + 1) < argc, "missing attach pid");
+			++i;
+			attach = 1;
+			attachpid = strtol(argv[i], NULL, 10);
+			printf("Attaching to process %u\n", attachpid);
+		} 
+		else if (strcmp(token, "-load") == 0) {
+			USAGE_CHECK((i + 1) < argc, "missing dll path");
+			++i;
+			load_custom_library(argv[i]);
+		} 
+		else {
 			FATAL("UNRECOGNIZED OPTION: \"%s\"\n", token);
 		}
 	}
@@ -519,7 +604,7 @@ void add_breakpoint(void *address, int type, char *module_name, void *module_bas
 	rwsize = 0;	
 	unsigned char cc = 0xCC;
 	if (!WriteProcessMemory(child_handle, address, &cc, 1, &rwsize) || (rwsize != 1)) {
-		FATAL("Error writing target memory\n");
+		FATAL("Error writing target memor : %x\n", GetLastError());
 	}
 	FlushInstructionCache(child_handle, address, 1);
 	new_breakpoint->address = address;
@@ -1157,13 +1242,23 @@ int debug_loop()
 		case CREATE_THREAD_DEBUG_EVENT:
 			break;
 
-		case CREATE_PROCESS_DEBUG_EVENT: {
+		case CREATE_PROCESS_DEBUG_EVENT: 
 			// add a brekpoint to the process entrypoint
-			void *entrypoint = get_entrypoint(DebugEv->u.CreateProcessInfo.lpBaseOfImage);
-			add_breakpoint(entrypoint, BREAKPOINT_ENTRYPOINT, NULL, 0);
+			if (attach) {
+				printf("Process entrypoint reached\n");
+				on_entrypoint();
+				set_bp = 1;
+				if (dll_run_ptr) {
+					printf("Running initialization function %p\n", dll_run_ptr);
+					dll_run_ptr(input_buf, input_length, 0);
+				}
+						
+			} else {
+				void *entrypoint = get_entrypoint(DebugEv->u.CreateProcessInfo.lpBaseOfImage);
+				add_breakpoint(entrypoint, BREAKPOINT_ENTRYPOINT, NULL, 0);
+			}
 			CloseHandle(DebugEv->u.CreateProcessInfo.hFile);
 			break;
-		}
 
 		case EXIT_THREAD_DEBUG_EVENT:
 			break;
@@ -1182,6 +1277,7 @@ int debug_loop()
 				char *base_name = strrchr(filename, '\\');
 				if (base_name) base_name += 1;
 				else base_name = filename;
+				printf("Module loaded: %s\n", base_name);
 				// printf("Module loaded: %s %p\n", base_name, DebugEv->u.LoadDll.lpBaseOfDll);
 				if (options.debug_mode) fprintf(debug_log, "Module loaded: %s\n", base_name);
 				// module isn't fully loaded yet. Instead of processing it now,
@@ -1270,6 +1366,135 @@ void wait_process_exit()
 			DebugEv->dwThreadId,
 			dbg_continue_status);
 	}
+}
+
+// void add_breakpoint_in_existing_module(DWORD pid, const char *target_module, size_t offset) {
+//     HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+//     if (hSnap == INVALID_HANDLE_VALUE) {
+//         printf("CreateToolhelp32Snapshot failed: %d\n", GetLastError());
+//         return;
+//     }
+
+//     MODULEENTRY32 me32;
+//     me32.dwSize = sizeof(MODULEENTRY32);
+
+//     if (Module32First(hSnap, &me32)) {
+//         do {
+//             char *base_name = strrchr(me32.szModule, '\\');
+//             if (base_name) base_name++; else base_name = me32.szModule;
+
+//             if (_stricmp(base_name, options.fuzz_module) == 0) {
+//                 printf("Found module %s at base %p\n", base_name, me32.modBaseAddr);
+// 				on_module_loaded(me32.hModule, base_name);
+//                 // void *bp_addr = (BYTE*)me32.modBaseAddr + offset;
+//                 // add_breakpoint(bp_addr, BREAKPOINT_FUZZMETHOD, base_name, me32.modBaseAddr);
+//                 break;
+//             }
+//         } while (Module32Next(hSnap, &me32));
+//     } else {
+//         printf("Module32First failed: %d\n", GetLastError());
+//     }
+
+//     CloseHandle(hSnap);
+// }
+
+void start_process_attach() {
+    HANDLE hJob = NULL;
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION job_limit;
+    BOOL inherit_handles = TRUE;
+
+    breakpoints = NULL;
+
+    if (sinkhole_stds && devnul_handle == INVALID_HANDLE_VALUE) {
+        devnul_handle = CreateFile(
+            "nul",
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            NULL,
+            OPEN_EXISTING,
+            0,
+            NULL);
+
+        if (devnul_handle == INVALID_HANDLE_VALUE) {
+            PFATAL("Unable to open the nul device.");
+        }
+    }
+
+    child_entrypoint_reached = FALSE;
+
+    // if (mem_limit || cpu_aff) {
+    //     hJob = CreateJobObject(NULL, NULL);
+    //     if (hJob == NULL) {
+    //         FATAL("CreateJobObject failed, GLE=%d.\n", GetLastError());
+    //     }
+
+    //     ZeroMemory(&job_limit, sizeof(job_limit));
+    //     if (mem_limit) {
+    //         job_limit.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY;
+    //         job_limit.ProcessMemoryLimit = (size_t)(mem_limit * 1024 * 1024);
+    //     }
+
+    //     if (cpu_aff) {
+    //         job_limit.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_AFFINITY;
+    //         job_limit.BasicLimitInformation.Affinity = (DWORD_PTR)cpu_aff;
+    //     }
+
+    //     if (!SetInformationJobObject(
+    //         hJob,
+    //         JobObjectExtendedLimitInformation,
+    //         &job_limit,
+    //         sizeof(job_limit)
+    //     )) {
+    //         FATAL("SetInformationJobObject failed, GLE=%d.\n", GetLastError());
+    //     }
+    // }
+
+	// 1) Attach debugger to the target process
+    if (!DebugActiveProcess(attachpid)) {
+        DWORD gle = GetLastError();
+        FATAL("DebugActiveProcess(%u) failed, GLE=%d.\n", attachpid, gle);
+    }
+
+    // 2) Open process handle with needed rights
+    child_handle = OpenProcess(
+        PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_CREATE_THREAD | PROCESS_SUSPEND_RESUME | PROCESS_TERMINATE | PROCESS_VM_OPERATION,
+        FALSE,
+        attachpid
+    );
+    if (child_handle == NULL) {
+        DWORD gle = GetLastError();
+        DebugActiveProcessStop(attachpid);
+        CloseHandle(child_handle);
+		FATAL("OpenProcess(%u) failed, GLE=%d.\n", attachpid, gle);
+    }
+        
+	// if (mem_limit || cpu_aff) {
+	// 	if (!AssignProcessToJobObject(hJob, child_handle)) {
+	// 		FATAL("AssignProcessToJobObject failed, GLE=%d.\n", GetLastError());
+	// 	}
+	// }
+
+    // 5) 检测 WOW64 状态（和 CreateProcess 路径相同）
+    BOOL wow64current = FALSE, wow64remote = FALSE;
+    if (!IsWow64Process(child_handle, &wow64remote)) {
+        FATAL("IsWow64Process failed");
+    }
+    if (wow64remote) {
+        wow64_target = 1;
+        child_ptr_size = 4;
+        // 你的 options.callconv 字段名可能不同，替换为实际字段
+        if (options.callconv == CALLCONV_DEFAULT) {
+            options.callconv = CALLCONV_CDECL;
+        }
+    }
+    if (!IsWow64Process(GetCurrentProcess(), &wow64current)) {
+        FATAL("IsWow64Process failed");
+    }
+    if (wow64current && wow64remote  && (options.decoder == DECODER_FULL_REFERENCE || options.decoder == DECODER_FULL_FAST) ) {
+        // 根据你原来代码里对 decoder 的检查，保持一致
+        FATAL("For full Intel PT decoding on 64-bit windows, you must use a 64-bit WinAFL build even on 32-bit targets");
+    }
+
 }
 
 // starts the target process
@@ -1393,10 +1618,12 @@ void kill_process() {
 	wait_process_exit();
 
 	CloseHandle(child_handle);
-	CloseHandle(child_thread_handle);
-
 	child_handle = NULL;
-	child_thread_handle = NULL;
+	
+	if (attach) {
+		CloseHandle(child_thread_handle);
+		child_thread_handle = NULL;
+	}
 
 	// delete any breakpoints that weren't hit
 	struct winafl_breakpoint *breakpoint = breakpoints;
@@ -1408,16 +1635,25 @@ void kill_process() {
 	breakpoints = NULL;
 }
 
-int run_target_pt(char **argv, uint32_t timeout) {
+int run_target_pt(char **argv, uint32_t timeout, char *buf, long fsize) {
 	int debugger_status;
 	int ret;
+	input_buf = buf;
+	input_length = fsize;
 
 	if (!child_handle) {
+		if (dll_init_ptr) {
+			if (!dll_init_ptr())
+			PFATAL("User-defined custom initialization routine returned 0");
+		}
 
-		char *cmd = argv_to_cmd(argv);
-		start_process(cmd);
-		ck_free(cmd);
-
+		if (attach) {
+			start_process_attach();
+		} else {
+			char *cmd = argv_to_cmd(argv);
+			start_process(cmd);
+			ck_free(cmd);
+		}
 		// wait until the target method is reached
 		dbg_timeout_time = get_cur_time() + timeout;
 		debugger_status = debug_loop();
@@ -1460,8 +1696,12 @@ int run_target_pt(char **argv, uint32_t timeout) {
 	dbg_timeout_time = get_cur_time() + timeout;
 
 	// printf("iteration start\n");
-
 	resumes_process();
+
+	if (set_bp && dll_run_ptr) {
+		dll_run_ptr(input_buf, input_length, fuzz_iterations_current);
+	}
+
 	debugger_status = debug_loop();
 
 	// printf("iteration end\n");
@@ -1540,9 +1780,11 @@ int run_target_pt(char **argv, uint32_t timeout) {
 
 	if (debugger_status == DEBUGGER_PROCESS_EXIT) {
 		CloseHandle(child_handle);
-		CloseHandle(child_thread_handle);
 		child_handle = NULL;
-		child_thread_handle = NULL;
+		if (!attach) {
+			CloseHandle(child_thread_handle);
+			child_thread_handle = NULL;
+		}
 		ret = FAULT_TMOUT; //treat it as a hang
 	} else if (debugger_status == DEBUGGER_HANGED) {
 		kill_process();
@@ -1573,7 +1815,7 @@ int pt_init(int argc, char **argv, char *module_dir) {
 			break;
 		}
 	}
-
+	printf("%s\n", argv[lastoption]);
 	if (lastoption <= 0) return 0;
 
 	winaflpt_options_init(lastoption - 1, argv + 1);
@@ -1619,7 +1861,7 @@ void debug_target_pt(char **argv) {
 	u8 * trace_bits_saved = (u8 *)malloc(MAP_SIZE);
 
 	for (int i = 0; i < options.fuzz_iterations; i++) {
-		int ret = run_target_pt(argv, 0xFFFFFFFF);
+		int ret = run_target_pt(argv, 0xFFFFFFFF, NULL, 0);
 
 		// detect variable coverage, could indicate a decoding issue
 		// skip 1st iteration, will likely hit more coverage

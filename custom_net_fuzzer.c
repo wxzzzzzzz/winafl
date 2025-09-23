@@ -81,7 +81,7 @@ static void send_data_udp(const char *buf, const int buf_len, int first_time) {
     static struct sockaddr_in si_other;
     static int s, slen = sizeof(si_other);
     static WSADATA wsa;
-
+    printf("send_data_udp called\n");
     if (first_time == 0x0) {
         /* wait while the target process open the socket */
         Sleep(socket_init_delay);
@@ -107,6 +107,8 @@ static void send_data_udp(const char *buf, const int buf_len, int first_time) {
 #define DEFAULT_BUFLEN 4096
 
 CUSTOM_SERVER_API int APIENTRY dll_run(char *data, long size, int fuzz_iterations) {
+    printf("dll_run called, size = %d, fuzz_iterations = %d\n", size, fuzz_iterations);
+    printf("Target IP: %s, Target port: %d, is_TCP: %d\n", target_ip_address, target_port, is_TCP);
     if (is_TCP)
         send_data_tcp(data, size, fuzz_iterations);
     else
