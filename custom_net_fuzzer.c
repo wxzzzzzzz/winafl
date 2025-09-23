@@ -21,6 +21,7 @@ limitations under the License.
 */
 
 #include "custom_winafl_server.h"
+#include <winsock2.h>
 
 static u8  enable_socket_fuzzing = 0; /* Enable network fuzzing           */
 static u8  is_TCP = 1;                /* TCP or UDP                       */
@@ -32,11 +33,15 @@ static u8 *target_ip_address = NULL;  /* Target IP to send test cases     */
 static SOCKET ListenSocket = INVALID_SOCKET;
 static SOCKET ClientSocket = INVALID_SOCKET;
 
+static struct sockaddr_in si_other;
+static int s, slen = sizeof(si_other);
+static WSADATA wsa;
+
 static void send_data_tcp(const char *buf, const int buf_len, int first_time) {
-    static struct sockaddr_in si_other;
-    static int slen = sizeof(si_other);
-    static WSADATA wsa;
-    int s;
+    // static struct sockaddr_in si_other;
+    // static int slen = sizeof(si_other);
+    // static WSADATA wsa;
+    // int s;
 
     if (first_time == 0x0) {
         /* wait while the target process open the socket */
@@ -78,9 +83,9 @@ static void send_data_tcp(const char *buf, const int buf_len, int first_time) {
 }
 
 static void send_data_udp(const char *buf, const int buf_len, int first_time) {
-    static struct sockaddr_in si_other;
-    static int s, slen = sizeof(si_other);
-    static WSADATA wsa;
+    // static struct sockaddr_in si_other;
+    // static int s, slen = sizeof(si_other);
+    // static WSADATA wsa;
     // printf("send_data_udp called\n");
     if (first_time == 0x0) {
         /* wait while the target process open the socket */
@@ -104,6 +109,25 @@ static void send_data_udp(const char *buf, const int buf_len, int first_time) {
         FATAL("sendto() failed with error code : %d", WSAGetLastError());
 }
 
+// static void recv_data_tcp() {
+
+// }
+
+static int recv_data_udp() {
+    char buf[3];
+    int buf_len = 3;
+    // recv the data
+    if (recvfrom(s, buf, buf_len, 0, (struct sockaddr *) &si_other, &slen) == SOCKET_ERROR)
+        FATAL("sendto() failed with error code : %d", WSAGetLastError());
+
+    if (strcmp(buf, "end") == 0) {
+        // printf("Received end command, exiting\n");
+        return 1;
+    }
+
+    return 0;
+}
+
 #define DEFAULT_BUFLEN 4096
 
 CUSTOM_SERVER_API int APIENTRY dll_run(char *data, long size, int fuzz_iterations) {
@@ -114,6 +138,14 @@ CUSTOM_SERVER_API int APIENTRY dll_run(char *data, long size, int fuzz_iteration
     else
         send_data_udp(data, size, fuzz_iterations);
     return 1;
+}
+
+CUSTOM_SERVER_API int APIENTRY dll_run_end() {
+    // printf("dll_run called, size = %d, fuzz_iterations = %d\n", size, fuzz_iterations);
+    // printf("Target IP: %s, Target port: %d, is_TCP: %d\n", target_ip_address, target_port, is_TCP);
+    if (!is_TCP)
+        return recv_data_udp();
+    return 0;
 }
 
 static int optind;
