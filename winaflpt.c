@@ -867,6 +867,7 @@ void on_module_loaded(HMODULE module, char *module_name) {
 
 	if (_stricmp(module_name, options.fuzz_module) == 0) {
 		char * fuzz_address = get_fuzz_method_offset(module);
+	
 		if (!fuzz_address) {
 			FATAL("Error determining target method address\n");
 		}
@@ -1099,6 +1100,21 @@ void on_entrypoint() {
 	child_entrypoint_reached = true;
 }
 
+void break_on_target() {
+	// printf("Entrypoint\n");
+
+	HMODULE *module_handles = NULL;
+	DWORD num_modules = get_all_modules(&module_handles);
+	for (DWORD i = 0; i < num_modules; i++) {
+		char base_name[MAX_PATH];
+		GetModuleBaseNameA(child_handle, module_handles[i], (LPSTR)(&base_name), sizeof(base_name));
+		if(options.debug_mode) fprintf(debug_log, "Module loaded: %s\n", base_name);
+		on_module_loaded(module_handles[i], base_name);
+	}
+	if(module_handles) free(module_handles);
+
+}
+
 // called when the debugger hits a breakpoint
 int handle_breakpoint(void *address, DWORD thread_id) {
 	int ret = BREAKPOINT_UNKNOWN;
@@ -1106,6 +1122,7 @@ int handle_breakpoint(void *address, DWORD thread_id) {
 	struct winafl_breakpoint *previous = NULL;
 	struct winafl_breakpoint *current = breakpoints;
 	while (current) {
+		
 		if (current->address == address) {
 			// unlink the breakpoint
 			if (previous) previous->next = current->next;
@@ -1136,6 +1153,8 @@ int handle_breakpoint(void *address, DWORD thread_id) {
 				on_module_loaded((HMODULE)current->module_base, current->module_name);
 				break;
 			case BREAKPOINT_FUZZMETHOD:
+				printf("Fuzz method reached\n");
+				printf("address: %p\n", address);
 				on_target_method(thread_id);
 				break;
 			default:
@@ -1210,6 +1229,7 @@ int debug_loop()
 			}
 
 			case EXCEPTION_ACCESS_VIOLATION: {
+				printf("Access violation at address %p\n", DebugEv->u.Exception.ExceptionRecord.ExceptionAddress);
 				if ((size_t)DebugEv->u.Exception.ExceptionRecord.ExceptionAddress == WINAFL_LOOP_EXCEPTION) {
 					on_target_method_ended(DebugEv->dwThreadId);
 					dbg_continue_status = DBG_CONTINUE;
@@ -1246,7 +1266,7 @@ int debug_loop()
 			// add a brekpoint to the process entrypoint
 			if (attach) {
 				printf("Process entrypoint reached\n");
-				on_entrypoint();
+				break_on_target();
 				set_bp = 1;
 				if (dll_run_ptr) {
 					printf("Running initialization function %p\n", dll_run_ptr);
@@ -1290,9 +1310,13 @@ int debug_loop()
 					void *entrypoint = get_entrypoint(DebugEv->u.LoadDll.lpBaseOfDll);
 					// printf("module %s entrypoint %p\n", base_name, entrypoint);
 					// if there is no entrypoint assume resource-only dll
+					printf("Module loaded: %s\n", base_name);
+					printf("Module base: %p\n", DebugEv->u.LoadDll.lpBaseOfDll);
+	
 					if (entrypoint) {
 						add_breakpoint(entrypoint, BREAKPOINT_MODULELOADED,
 							base_name, DebugEv->u.LoadDll.lpBaseOfDll);
+						
 					} else {
 						printf("Warning: module %s has no entrypoint, "
 							"assuming resource-only. "
@@ -1420,7 +1444,7 @@ void start_process_attach() {
         }
     }
 
-    child_entrypoint_reached = FALSE;
+    child_entrypoint_reached = false;
 
     // if (mem_limit || cpu_aff) {
     //     hJob = CreateJobObject(NULL, NULL);
@@ -1657,6 +1681,7 @@ int run_target_pt(char **argv, uint32_t timeout, char *buf, long fsize) {
 		// wait until the target method is reached
 		dbg_timeout_time = get_cur_time() + timeout;
 		debugger_status = debug_loop();
+		printf("Initial debugger loop returned %d\n", debugger_status);
 
 		if (debugger_status != DEBUGGER_FUZZMETHOD_REACHED) {
 			switch (debugger_status) {

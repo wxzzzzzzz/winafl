@@ -782,7 +782,7 @@ inline static int update_coverage_cache(struct coverage_cache_t *coverage_cache,
 
 	if (!current_range->collect) return 0;
 
-	// printf("ip: %p\n", (void*)next_ip);
+	printf("ip: %p\n", (void*)next_ip);
 
 	offset = (uint32_t)(next_ip - current_range->start);
 
@@ -1515,10 +1515,10 @@ void analyze_trace_full_fast(unsigned char *trace_data, size_t trace_size,
 
 	pt_blk_free_decoder(decoder);
 
-	// printf("Cache hits: %d/%d (%g%%)\n", num_cache_hits, num_tracelets,
-	// 	((float)num_cache_hits / num_tracelets) * 100);
-	// printf("tracelet cache num entries: %llu, size: %llu\n",
-	// 	tracelet_cache.num_entries, tracelet_cache.size);
+	printf("Cache hits: %d/%d (%g%%)\n", num_cache_hits, num_tracelets,
+		((float)num_cache_hits / num_tracelets) * 100);
+	printf("tracelet cache num entries: %llu, size: %llu\n",
+		tracelet_cache.num_entries, tracelet_cache.size);
 }
 
 // uses Intel's reference basic block decoder to decode the full trace
