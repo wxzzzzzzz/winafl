@@ -18,6 +18,7 @@
   limitations under the License.
 */
 
+#include <string.h>
 #include <sys/stat.h>
 #define  _CRT_SECURE_NO_WARNINGS
 
@@ -184,6 +185,7 @@ struct winafl_breakpoint *breakpoints;
 typedef int (APIENTRY* dll_run)(char*, long, int);
 typedef int (APIENTRY* dll_run_end)();
 typedef int (APIENTRY* dll_init)();
+typedef int (APIENTRY* dll_run_end)();
 typedef u8 (APIENTRY* dll_run_target)(char**, u32, char*, u32);
 typedef void (APIENTRY *dll_write_to_testcase)(char*, s32, const void*, u32);
 typedef u8 (APIENTRY* dll_mutate_testcase)(char**, u8*, u32, u8 (*)(char **, u8*, u32));
@@ -209,7 +211,7 @@ static void load_custom_library(const char *libname)
 	SAYF("Loading custom winAFL server library\n");
 	HMODULE hLib = LoadLibraryEx(libname, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
 	if (hLib == NULL)
-	FATAL("Unable to load custom server library, GetLastError = 0x%x", GetLastError());
+		FATAL("Unable to load custom server library, GetLastError = 0x%x", GetLastError());
 
 	/* init the custom server */
 	// Get pointer to user-defined server initialization function using GetProcAddress:
@@ -219,15 +221,15 @@ static void load_custom_library(const char *libname)
 	// Get pointer to user-defined test cases sending function using GetProcAddress:
 	dll_run_ptr = (dll_run)GetProcAddress(hLib, "dll_run");
 	SAYF("dll_run_ptr %s defined.\n", dll_run_ptr ? "is" : "isn't");
-	if (!dll_run_ptr) {
-		FATAL("dll_run function not found in the custom library\n");
-	} 
+
+	if (dll_run_ptr == NULL)
+		FATAL("Unable to find dll_run function in custom server library");
 
 	dll_run_end_ptr = (dll_run_end)GetProcAddress(hLib, "dll_run_end");
 	SAYF("dll_run_end %s defined.\n", dll_run_end_ptr ? "is" : "isn't");
-	if (!dll_run_end_ptr) {
-		FATAL("dll_run_end function not found in the custom library\n");
-	}
+
+	if (dll_run_end_ptr == NULL)
+		FATAL("Unable to find dll_run_end function in custom server library");
 
 	// Get pointer to user-defined run_target function using GetProcAddress:
 	dll_run_target_ptr = (dll_run_target)GetProcAddress(hLib, "dll_run_target");
@@ -1485,10 +1487,10 @@ void start_process_attach() {
     // }
 
 	// 1) Attach debugger to the target process
-    if (!DebugActiveProcess(attachpid)) {
-        DWORD gle = GetLastError();
-        FATAL("DebugActiveProcess(%u) failed, GLE=%d.\n", attachpid, gle);
-    }
+    // if (!DebugActiveProcess(attachpid)) {
+    //     DWORD gle = GetLastError();
+    //     FATAL("DebugActiveProcess(%u) failed, GLE=%d.\n", attachpid, gle);
+    // }
 
     // 2) Open process handle with needed rights
     child_handle = OpenProcess(
@@ -1672,6 +1674,7 @@ void kill_process() {
 
 int run_target_pt(char **argv, uint32_t timeout, char *buf, long fsize) {
 	int debugger_status;
+	int status;
 	int ret;
 	input_buf = buf;
 	input_length = fsize;
@@ -1679,7 +1682,7 @@ int run_target_pt(char **argv, uint32_t timeout, char *buf, long fsize) {
 	if (!child_handle) {
 		if (dll_init_ptr) {
 			if (!dll_init_ptr())
-			PFATAL("User-defined custom initialization routine returned 0");
+				FATAL("User-defined custom initialization routine returned 0");
 		}
 
 		if (attach) {
@@ -1692,7 +1695,6 @@ int run_target_pt(char **argv, uint32_t timeout, char *buf, long fsize) {
 		// wait until the target method is reached
 		dbg_timeout_time = get_cur_time() + timeout;
 		// debugger_status = debug_loop();
-		// printf("Initial debugger loop returned %d\n", debugger_status);
 
 		// if (debugger_status != DEBUGGER_FUZZMETHOD_REACHED) {
 		// 	switch (debugger_status) {
@@ -1735,8 +1737,34 @@ int run_target_pt(char **argv, uint32_t timeout, char *buf, long fsize) {
 	// resumes_process();
 
 	dll_run_ptr(input_buf, input_length, fuzz_iterations_current);
-	dll_run_end_ptr();
 
+	while (1) {
+		char data[5];
+
+		if (dll_run_end_ptr(data, sizeof(data)) > 0) {
+			if (strcmp(data, "end") == 0) {
+				ret = FAULT_NONE;
+			} else if (strcmp(data, "crash") == 0) {
+				ret = FAULT_CRASH;
+			} 
+		} 
+
+		if (get_cur_time() > dbg_timeout_time) {
+			DWORD exitCode;
+			GetExitCodeProcess(child_handle, &exitCode);
+			
+			if (exitCode == STILL_ACTIVE) {
+				ret = FAULT_TMOUT;
+			} else {
+				ret = FAULT_CRASH;
+			}
+
+			break;
+		}
+	}
+
+	if (ret == FAULT_CRASH)
+		return ret;
 	// debugger_status = debug_loop();
 
 	// printf("iteration end\n");
@@ -1831,15 +1859,6 @@ int run_target_pt(char **argv, uint32_t timeout, char *buf, long fsize) {
 	// 	ret = FAULT_NONE;
 	// }
 
-	DWORD exitCode;
-	if (GetExitCodeProcess(hProcess, &exitCode)) {
-		if (exitCode != STILL_ACTIVE) {
-			ret = FAULT_CRASH;
-		} else {
-			ret = FAULT_NONE;
-		}
-	}
-
 	// fuzz_iterations_current++;
 	// if (fuzz_iterations_current == options.fuzz_iterations && child_handle != NULL) {
 	// 	kill_process();
@@ -1859,7 +1878,7 @@ int pt_init(int argc, char **argv, char *module_dir) {
 			break;
 		}
 	}
-	printf("%s\n", argv[lastoption]);
+	// printf("%s\n", argv[lastoption]);
 	if (lastoption <= 0) return 0;
 
 	winaflpt_options_init(lastoption - 1, argv + 1);
