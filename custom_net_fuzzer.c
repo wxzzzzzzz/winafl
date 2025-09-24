@@ -21,6 +21,7 @@ limitations under the License.
 */
 
 #include "custom_winafl_server.h"
+#include <string.h>
 
 static u8  enable_socket_fuzzing = 0; /* Enable network fuzzing           */
 static u8  is_TCP = 1;                /* TCP or UDP                       */
@@ -32,11 +33,16 @@ static u8 *target_ip_address = NULL;  /* Target IP to send test cases     */
 static SOCKET ListenSocket = INVALID_SOCKET;
 static SOCKET ClientSocket = INVALID_SOCKET;
 
+static struct sockaddr_in si_other;
+static int s, slen = sizeof(si_other);
+static WSADATA wsa;
+static u8 first;
+
 static void send_data_tcp(const char *buf, const int buf_len, int first_time) {
-    static struct sockaddr_in si_other;
-    static int slen = sizeof(si_other);
-    static WSADATA wsa;
-    int s;
+    // static struct sockaddr_in si_other;
+    // static int slen = sizeof(si_other);
+    // static WSADATA wsa;
+    // int s;
 
     if (first_time == 0x0) {
         /* wait while the target process open the socket */
@@ -78,11 +84,11 @@ static void send_data_tcp(const char *buf, const int buf_len, int first_time) {
 }
 
 static void send_data_udp(const char *buf, const int buf_len, int first_time) {
-    static struct sockaddr_in si_other;
-    static int s, slen = sizeof(si_other);
-    static WSADATA wsa;
-    printf("send_data_udp called\n");
-    if (first_time == 0x0) {
+    // static struct sockaddr_in si_other;
+    // static int s, slen = sizeof(si_other);
+    // static WSADATA wsa;
+    // printf("send_data_udp called\n");
+    if (first == 0x0) {
         /* wait while the target process open the socket */
         Sleep(socket_init_delay);
 
@@ -92,11 +98,15 @@ static void send_data_udp(const char *buf, const int buf_len, int first_time) {
         if ((s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == SOCKET_ERROR)
             FATAL("socket() failed with error code : %d", WSAGetLastError());
 
+        u_long mode = 1;  // 1 = non-blocking, 0 = blocking
+        ioctlsocket(s, FIONBIO, &mode);
+
         // setup address structure
         memset((char *)&si_other, 0, sizeof(si_other));
         si_other.sin_family = AF_INET;
         si_other.sin_port = htons(target_port);
         si_other.sin_addr.S_un.S_addr = inet_addr((char *)target_ip_address);
+        first = 0x1;
     }
 
     // send the data
@@ -104,16 +114,30 @@ static void send_data_udp(const char *buf, const int buf_len, int first_time) {
         FATAL("sendto() failed with error code : %d", WSAGetLastError());
 }
 
+static int recv_data_udp(char *data, long size) {
+    //try to receive some data, this is a blocking call
+    return recvfrom(s, data, size, 0, (struct sockaddr *) &si_other, &slen);
+}
+
 #define DEFAULT_BUFLEN 4096
 
 CUSTOM_SERVER_API int APIENTRY dll_run(char *data, long size, int fuzz_iterations) {
-    printf("dll_run called, size = %d, fuzz_iterations = %d\n", size, fuzz_iterations);
-    printf("Target IP: %s, Target port: %d, is_TCP: %d\n", target_ip_address, target_port, is_TCP);
+    // printf("dll_run called, size = %d, fuzz_iterations = %d\n", size, fuzz_iterations);
+    // printf("Target IP: %s, Target port: %d, is_TCP: %d\n", target_ip_address, target_port, is_TCP);
     if (is_TCP)
         send_data_tcp(data, size, fuzz_iterations);
     else
         send_data_udp(data, size, fuzz_iterations);
     return 1;
+}
+
+CUSTOM_SERVER_API int APIENTRY dll_run_end(char *data, long size) {
+    // printf("dll_run called, size = %d, fuzz_iterations = %d\n", size, fuzz_iterations);
+    // printf("Target IP: %s, Target port: %d, is_TCP: %d\n", target_ip_address, target_port, is_TCP);
+    if (!is_TCP)
+        return recv_data_udp(data, size);
+    
+    return 0;
 }
 
 static int optind;
@@ -252,6 +276,7 @@ CUSTOM_SERVER_API int APIENTRY dll_init() {
 
     printf("Ready to begin fuzzing. Target IP= %s, target port = %d\n",
            target_ip_address, target_port);
+
     first_time = 0x0;
     return 1;
 }

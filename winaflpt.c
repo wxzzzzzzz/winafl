@@ -18,6 +18,7 @@
   limitations under the License.
 */
 
+#include <string.h>
 #include <sys/stat.h>
 #define  _CRT_SECURE_NO_WARNINGS
 
@@ -183,6 +184,7 @@ struct winafl_breakpoint *breakpoints;
 //Define the function prototypes
 typedef int (APIENTRY* dll_run)(char*, long, int);
 typedef int (APIENTRY* dll_init)();
+typedef int (APIENTRY* dll_run_end)();
 typedef u8 (APIENTRY* dll_run_target)(char**, u32, char*, u32);
 typedef void (APIENTRY *dll_write_to_testcase)(char*, s32, const void*, u32);
 typedef u8 (APIENTRY* dll_mutate_testcase)(char**, u8*, u32, u8 (*)(char **, u8*, u32));
@@ -193,6 +195,7 @@ typedef u8 (APIENTRY* dll_mutate_testcase_with_energy)(char**, u8*, u32, u32, u8
 
 // custom server functions
 static dll_run dll_run_ptr = NULL;
+static dll_run_end dll_run_end_ptr = NULL;
 static dll_init dll_init_ptr = NULL;
 static dll_run_target dll_run_target_ptr = NULL;
 static dll_write_to_testcase dll_write_to_testcase_ptr = NULL;
@@ -203,42 +206,51 @@ static dll_mutate_testcase_with_energy dll_mutate_testcase_with_energy_ptr = NUL
 /* This routine is designed to load user-defined library for custom test cases processing */
 static void load_custom_library(const char *libname)
 {
-  int result = 0;
-  SAYF("Loading custom winAFL server library\n");
-  HMODULE hLib = LoadLibraryEx(libname, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
-  if (hLib == NULL)
-    FATAL("Unable to load custom server library, GetLastError = 0x%x", GetLastError());
+	int result = 0;
+	SAYF("Loading custom winAFL server library\n");
+	HMODULE hLib = LoadLibraryEx(libname, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+	if (hLib == NULL)
+		FATAL("Unable to load custom server library, GetLastError = 0x%x", GetLastError());
 
-  /* init the custom server */
-  // Get pointer to user-defined server initialization function using GetProcAddress:
-  dll_init_ptr = (dll_init)GetProcAddress(hLib, "dll_init");
-  SAYF("dll_init %s defined.\n", dll_init_ptr ? "is" : "isn't");
+	/* init the custom server */
+	// Get pointer to user-defined server initialization function using GetProcAddress:
+	dll_init_ptr = (dll_init)GetProcAddress(hLib, "dll_init");
+	SAYF("dll_init %s defined.\n", dll_init_ptr ? "is" : "isn't");
 
-  // Get pointer to user-defined test cases sending function using GetProcAddress:
-  dll_run_ptr = (dll_run)GetProcAddress(hLib, "dll_run");
-  SAYF("dll_run_ptr %s defined.\n", dll_run_ptr ? "is" : "isn't");
+	// Get pointer to user-defined test cases sending function using GetProcAddress:
+	dll_run_ptr = (dll_run)GetProcAddress(hLib, "dll_run");
+	SAYF("dll_run_ptr %s defined.\n", dll_run_ptr ? "is" : "isn't");
 
-  // Get pointer to user-defined run_target function using GetProcAddress:
-  dll_run_target_ptr = (dll_run_target)GetProcAddress(hLib, "dll_run_target");
-  SAYF("dll_run_target %s defined.\n", dll_run_target_ptr ? "is" : "isn't");
+	if (dll_run_ptr == NULL)
+		FATAL("Unable to find dll_run function in custom server library");
 
-  // Get pointer to user-defined write_to_testcase function using GetProcAddress:
-  dll_write_to_testcase_ptr = (dll_write_to_testcase)GetProcAddress(hLib, "dll_write_to_testcase");
-  SAYF("dll_write_to_testcase %s defined.\n", dll_write_to_testcase_ptr ? "is" : "isn't");
+	dll_run_end_ptr = (dll_run_end)GetProcAddress(hLib, "dll_run_end");
+	SAYF("dll_run_end %s defined.\n", dll_run_end_ptr ? "is" : "isn't");
 
-  // Get pointer to user-defined mutate_testcase function using GetProcAddress:
-  dll_mutate_testcase_ptr = (dll_mutate_testcase)GetProcAddress(hLib, "dll_mutate_testcase");
-  SAYF("dll_mutate_testcase %s defined.\n", dll_mutate_testcase_ptr ? "is" : "isn't");
+	if (dll_run_end_ptr == NULL)
+		FATAL("Unable to find dll_run_end function in custom server library");
 
-  // Get pointer to user-defined trim_testcase function using GetProcAddress:
-  dll_trim_testcase_ptr = (dll_trim_testcase)GetProcAddress(hLib, "dll_trim_testcase");
-  SAYF("dll_trim_testcase %s defined.\n", dll_mutate_testcase_ptr ? "is" : "isn't");
+	// Get pointer to user-defined run_target function using GetProcAddress:
+	dll_run_target_ptr = (dll_run_target)GetProcAddress(hLib, "dll_run_target");
+	SAYF("dll_run_target %s defined.\n", dll_run_target_ptr ? "is" : "isn't");
 
-  // Get pointer to user-defined dll_mutate_testcase_with_energy_ptr function using GetProcAddress:
-  dll_mutate_testcase_with_energy_ptr = (dll_mutate_testcase_with_energy)GetProcAddress(hLib, "dll_mutate_testcase_with_energy");
-  SAYF("dll_mutate_testcase_with_energy %s defined.\n", dll_mutate_testcase_with_energy_ptr ? "is" : "isn't");
+	// Get pointer to user-defined write_to_testcase function using GetProcAddress:
+	dll_write_to_testcase_ptr = (dll_write_to_testcase)GetProcAddress(hLib, "dll_write_to_testcase");
+	SAYF("dll_write_to_testcase %s defined.\n", dll_write_to_testcase_ptr ? "is" : "isn't");
 
-  SAYF("Sucessfully loaded and initalized\n");
+	// Get pointer to user-defined mutate_testcase function using GetProcAddress:
+	dll_mutate_testcase_ptr = (dll_mutate_testcase)GetProcAddress(hLib, "dll_mutate_testcase");
+	SAYF("dll_mutate_testcase %s defined.\n", dll_mutate_testcase_ptr ? "is" : "isn't");
+
+	// Get pointer to user-defined trim_testcase function using GetProcAddress:
+	dll_trim_testcase_ptr = (dll_trim_testcase)GetProcAddress(hLib, "dll_trim_testcase");
+	SAYF("dll_trim_testcase %s defined.\n", dll_mutate_testcase_ptr ? "is" : "isn't");
+
+	// Get pointer to user-defined dll_mutate_testcase_with_energy_ptr function using GetProcAddress:
+	dll_mutate_testcase_with_energy_ptr = (dll_mutate_testcase_with_energy)GetProcAddress(hLib, "dll_mutate_testcase_with_energy");
+	SAYF("dll_mutate_testcase_with_energy %s defined.\n", dll_mutate_testcase_with_energy_ptr ? "is" : "isn't");
+
+	SAYF("Sucessfully loaded and initalized\n");
 }
 
 static void
@@ -1450,10 +1462,10 @@ void start_process_attach() {
     // }
 
 	// 1) Attach debugger to the target process
-    if (!DebugActiveProcess(attachpid)) {
-        DWORD gle = GetLastError();
-        FATAL("DebugActiveProcess(%u) failed, GLE=%d.\n", attachpid, gle);
-    }
+    // if (!DebugActiveProcess(attachpid)) {
+    //     DWORD gle = GetLastError();
+    //     FATAL("DebugActiveProcess(%u) failed, GLE=%d.\n", attachpid, gle);
+    // }
 
     // 2) Open process handle with needed rights
     child_handle = OpenProcess(
@@ -1637,6 +1649,7 @@ void kill_process() {
 
 int run_target_pt(char **argv, uint32_t timeout, char *buf, long fsize) {
 	int debugger_status;
+	int status;
 	int ret;
 	input_buf = buf;
 	input_length = fsize;
@@ -1644,7 +1657,7 @@ int run_target_pt(char **argv, uint32_t timeout, char *buf, long fsize) {
 	if (!child_handle) {
 		if (dll_init_ptr) {
 			if (!dll_init_ptr())
-			PFATAL("User-defined custom initialization routine returned 0");
+				FATAL("User-defined custom initialization routine returned 0");
 		}
 
 		if (attach) {
@@ -1656,24 +1669,24 @@ int run_target_pt(char **argv, uint32_t timeout, char *buf, long fsize) {
 		}
 		// wait until the target method is reached
 		dbg_timeout_time = get_cur_time() + timeout;
-		debugger_status = debug_loop();
+		// debugger_status = debug_loop();
 
-		if (debugger_status != DEBUGGER_FUZZMETHOD_REACHED) {
-			switch (debugger_status) {
-			case DEBUGGER_CRASHED:
-				FATAL("Process crashed before reaching the target method\n");
-				break;
-			case DEBUGGER_HANGED:
-				FATAL("Process hanged before reaching the target method\n");
-				break;
-			case DEBUGGER_PROCESS_EXIT:
-				FATAL("Process exited before reaching the target method\n");
-				break;
-			default:
-				FATAL("An unknown problem occured before reaching the target method\n");
-				break;
-			}
-		}
+		// if (debugger_status != DEBUGGER_FUZZMETHOD_REACHED) {
+		// 	switch (debugger_status) {
+		// 	case DEBUGGER_CRASHED:
+		// 		FATAL("Process crashed before reaching the target method\n");
+		// 		break;
+		// 	case DEBUGGER_HANGED:
+		// 		FATAL("Process hanged before reaching the target method\n");
+		// 		break;
+		// 	case DEBUGGER_PROCESS_EXIT:
+		// 		FATAL("Process exited before reaching the target method\n");
+		// 		break;
+		// 	default:
+		// 		FATAL("An unknown problem occured before reaching the target method\n");
+		// 		break;
+		// 	}
+		// }
 
 		fuzz_iterations_current = 0;
 	}
@@ -1696,13 +1709,38 @@ int run_target_pt(char **argv, uint32_t timeout, char *buf, long fsize) {
 	dbg_timeout_time = get_cur_time() + timeout;
 
 	// printf("iteration start\n");
-	resumes_process();
+	// resumes_process();
 
-	if (set_bp && dll_run_ptr) {
-		dll_run_ptr(input_buf, input_length, fuzz_iterations_current);
+	dll_run_ptr(input_buf, input_length, fuzz_iterations_current);
+
+	while (1) {
+		char data[5];
+
+		if (dll_run_end_ptr(data, sizeof(data)) > 0) {
+			if (strcmp(data, "end") == 0) {
+				ret = FAULT_NONE;
+			} else if (strcmp(data, "crash") == 0) {
+				ret = FAULT_CRASH;
+			} 
+		} 
+
+		if (get_cur_time() > dbg_timeout_time) {
+			DWORD exitCode;
+			GetExitCodeProcess(child_handle, &exitCode);
+			
+			if (exitCode == STILL_ACTIVE) {
+				ret = FAULT_TMOUT;
+			} else {
+				ret = FAULT_CRASH;
+			}
+
+			break;
+		}
 	}
 
-	debugger_status = debug_loop();
+	if (ret == FAULT_CRASH)
+		return ret;
+	// debugger_status = debug_loop();
 
 	// printf("iteration end\n");
 
@@ -1778,28 +1816,28 @@ int run_target_pt(char **argv, uint32_t timeout, char *buf, long fsize) {
 
 	if(image) pt_image_free(image);
 
-	if (debugger_status == DEBUGGER_PROCESS_EXIT) {
-		CloseHandle(child_handle);
-		child_handle = NULL;
-		if (!attach) {
-			CloseHandle(child_thread_handle);
-			child_thread_handle = NULL;
-		}
-		ret = FAULT_TMOUT; //treat it as a hang
-	} else if (debugger_status == DEBUGGER_HANGED) {
-		kill_process();
-		ret = FAULT_TMOUT;
-	} else if (debugger_status == DEBUGGER_CRASHED) {
-		kill_process();
-		ret = FAULT_CRASH;
-	} else if (debugger_status == DEBUGGER_FUZZMETHOD_END) {
-		ret = FAULT_NONE;
-	}
+	// if (debugger_status == DEBUGGER_PROCESS_EXIT) {
+	// 	CloseHandle(child_handle);
+	// 	child_handle = NULL;
+	// 	if (!attach) {
+	// 		CloseHandle(child_thread_handle);
+	// 		child_thread_handle = NULL;
+	// 	}
+	// 	ret = FAULT_TMOUT; //treat it as a hang
+	// } else if (debugger_status == DEBUGGER_HANGED) {
+	// 	kill_process();
+	// 	ret = FAULT_TMOUT;
+	// } else if (debugger_status == DEBUGGER_CRASHED) {
+	// 	kill_process();
+	// 	ret = FAULT_CRASH;
+	// } else if (debugger_status == DEBUGGER_FUZZMETHOD_END) {
+	// 	ret = FAULT_NONE;
+	// }
 
-	fuzz_iterations_current++;
-	if (fuzz_iterations_current == options.fuzz_iterations && child_handle != NULL) {
-		kill_process();
-	}
+	// fuzz_iterations_current++;
+	// if (fuzz_iterations_current == options.fuzz_iterations && child_handle != NULL) {
+	// 	kill_process();
+	// }
 
 	return ret;
 }
@@ -1815,7 +1853,7 @@ int pt_init(int argc, char **argv, char *module_dir) {
 			break;
 		}
 	}
-	printf("%s\n", argv[lastoption]);
+	// printf("%s\n", argv[lastoption]);
 	if (lastoption <= 0) return 0;
 
 	winaflpt_options_init(lastoption - 1, argv + 1);
