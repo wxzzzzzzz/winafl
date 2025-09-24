@@ -547,14 +547,15 @@ bool collect_trace(PIPT_TRACE_DATA pTraceData)
 	DWORD dwTraceSize;
 
 	dwTraceSize = pTraceData->TraceSize;
+	// printf("size : %lx\n", dwTraceSize);
 
 	traceHeader = (PIPT_TRACE_HEADER)pTraceData->TraceData;
 
 	while (dwTraceSize > (unsigned)(FIELD_OFFSET(IPT_TRACE_HEADER, Trace))) {
-		if (traceHeader->ThreadId == fuzz_thread_id) {
-			trace_buffer_overflow = collect_thread_trace(traceHeader);
-		}
-
+		// if (traceHeader->ThreadId == fuzz_thread_id) {
+		// 	trace_buffer_overflow = collect_thread_trace(traceHeader);
+		// }
+		trace_buffer_overflow = collect_thread_trace(traceHeader);
 		dwTraceSize -= (FIELD_OFFSET(IPT_TRACE_HEADER, Trace) + traceHeader->TraceSize);
 
 		traceHeader = (PIPT_TRACE_HEADER)(traceHeader->Trace +
@@ -878,18 +879,18 @@ void on_module_loaded(HMODULE module, char *module_name) {
 		add_module_to_section_cache(module, module_name);
 	}
 
-	if (_stricmp(module_name, options.fuzz_module) == 0) {
-		char * fuzz_address = get_fuzz_method_offset(module);
+	// if (_stricmp(module_name, options.fuzz_module) == 0) {
+	// 	char * fuzz_address = get_fuzz_method_offset(module);
 	
-		if (!fuzz_address) {
-			FATAL("Error determining target method address\n");
-		}
+	// 	if (!fuzz_address) {
+	// 		FATAL("Error determining target method address\n");
+	// 	}
 
-		// printf("Fuzz method address: %p\n", fuzz_address);
-		options.fuzz_address = fuzz_address;
+	// 	// printf("Fuzz method address: %p\n", fuzz_address);
+	// 	options.fuzz_address = fuzz_address;
 
-		add_breakpoint(fuzz_address, BREAKPOINT_FUZZMETHOD, NULL, 0);
-	}
+	// 	add_breakpoint(fuzz_address, BREAKPOINT_FUZZMETHOD, NULL, 0);
+	// }
 }
 
 void read_stack(void *stack_addr, void **buffer, size_t numitems) {
@@ -1500,7 +1501,6 @@ void start_process_attach() {
     );
     if (child_handle == NULL) {
         DWORD gle = GetLastError();
-        DebugActiveProcessStop(attachpid);
         CloseHandle(child_handle);
 		FATAL("OpenProcess(%u) failed, GLE=%d.\n", attachpid, gle);
     }
@@ -1687,6 +1687,7 @@ int run_target_pt(char **argv, uint32_t timeout, char *buf, long fsize) {
 
 		if (attach) {
 			start_process_attach();
+			on_entrypoint();
 		} else {
 			char *cmd = argv_to_cmd(argv);
 			start_process(cmd);
@@ -1722,13 +1723,19 @@ int run_target_pt(char **argv, uint32_t timeout, char *buf, long fsize) {
 	if ((!options.persistent_trace) || (fuzz_iterations_current == 0)) {
 		IPT_OPTIONS ipt_options;
 		memset(&ipt_options, 0, sizeof(IPT_OPTIONS));
-		ipt_options.OptionVersion = 1;
-		ConfigureBufferSize(options.trace_buffer_size, &ipt_options);
-		ConfigureTraceFlags(0, &ipt_options);
-		if (!StartProcessIptTracing(child_handle, ipt_options)) {
-			FATAL("ipt tracing error\n");
+		QueryProcessIptTracing(child_handle, &ipt_options);
+
+		if (ipt_options.OptionVersion != 1){
+			// printf("start trace\n");
+			memset(&ipt_options, 0, sizeof(IPT_OPTIONS));
+			ipt_options.OptionVersion = 1;
+			ConfigureBufferSize(options.trace_buffer_size, &ipt_options);
+			ConfigureTraceFlags(0, &ipt_options);
+			if (!StartProcessIptTracing(child_handle, ipt_options)) {
+				FATAL("ipt tracing error\n");
+			}
+			last_ring_buffer_offset = 0;
 		}
-		last_ring_buffer_offset = 0;
 	}
 
 	dbg_timeout_time = get_cur_time() + timeout;
@@ -1739,30 +1746,30 @@ int run_target_pt(char **argv, uint32_t timeout, char *buf, long fsize) {
 	dll_run_ptr(input_buf, input_length, fuzz_iterations_current);
 
 	while (1) {
-		char data[5];
+		char data[7];
 
 		if (dll_run_end_ptr(data, sizeof(data)) > 0) {
+			// printf("%s\n", data);
 			if (strcmp(data, "end") == 0) {
 				ret = FAULT_NONE;
-			} else if (strcmp(data, "crash") == 0) {
-				ret = FAULT_CRASH;
+				break;
+			} else if (strcmp(data, "timeout") == 0) {
+				ret = FAULT_TMOUT;
 			} 
 		} 
-
-		if (get_cur_time() > dbg_timeout_time) {
+		
+		if (ret == FAULT_TMOUT) {
 			DWORD exitCode;
 			GetExitCodeProcess(child_handle, &exitCode);
 			
-			if (exitCode == STILL_ACTIVE) {
-				ret = FAULT_TMOUT;
-			} else {
+			if (exitCode != STILL_ACTIVE) {
 				ret = FAULT_CRASH;
 			}
 
 			break;
 		}
 	}
-
+	// printf("ret : %d\n", ret);
 	if (ret == FAULT_CRASH)
 		return ret;
 	// debugger_status = debug_loop();
@@ -1775,6 +1782,7 @@ int run_target_pt(char **argv, uint32_t timeout, char *buf, long fsize) {
 	if (!trace_data) {
 		printf("Error getting ipt trace\n");
 	} else {
+		// printf("%d\n", trace_data->TraceSize);
 		trace_buffer_overflowed = collect_trace(trace_data);
 		HeapFree(GetProcessHeap(), 0, trace_data);
 	}
@@ -1848,7 +1856,7 @@ int run_target_pt(char **argv, uint32_t timeout, char *buf, long fsize) {
 	// 		CloseHandle(child_thread_handle);
 	// 		child_thread_handle = NULL;
 	// 	}
-	// 	ret = FAULT_TMOUT; //treat it as a hang
+	// 	ret = FAULT_TMOUT; //treat it as a hanggit config --global -l
 	// } else if (debugger_status == DEBUGGER_HANGED) {
 	// 	kill_process();
 	// 	ret = FAULT_TMOUT;
@@ -1863,6 +1871,7 @@ int run_target_pt(char **argv, uint32_t timeout, char *buf, long fsize) {
 	// if (fuzz_iterations_current == options.fuzz_iterations && child_handle != NULL) {
 	// 	kill_process();
 	// }
+	// printf("ret : %d\n", ret);
 
 	return ret;
 }

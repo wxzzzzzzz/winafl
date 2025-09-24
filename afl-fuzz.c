@@ -3077,13 +3077,14 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
     write_to_testcase(use_mem, q->len);
 
     fault = run_target(argv, use_tmout);
-
+    // printf("%s\n", trace_bits);
     /* stop_soon is set by the handler for Ctrl+C. When it's pressed,
        we want to bail out quickly. */
 
     if (stop_soon || fault != crash_mode) goto abort_calibration;
-
+    // printf("111\n");
     if (!dumb_mode && !stage_cur && !count_bytes(trace_bits)) {
+      // printf("222\n");
       fault = FAULT_NOINST;
       goto abort_calibration;
     }
@@ -7436,6 +7437,9 @@ static void check_binary(u8* fname) {
 
 static void fix_up_banner(u8* name) {
 
+  if (!name) {
+    use_banner = (u8*)"fuzzzzzz !!";
+  }
   if (!use_banner) {
 
     if (sync_id) {
@@ -8523,8 +8527,8 @@ int main(int argc, char** argv) {
     FATAL("AFL_DUMB_FORKSRV and AFL_NO_FORKSRV are mutually exclusive");
 
   save_cmdline(argc, argv);
-  if (!use_intelpt) 
-    fix_up_banner(argv[optind]);
+  // if (!use_intelpt) 
+  fix_up_banner(argv[optind]);
     
   check_if_tty();
 
@@ -8606,7 +8610,7 @@ int main(int argc, char** argv) {
   /* Woop woop woop */
 
   while (1) {
-
+    printf("stop_soon: %d\n", stop_soon);
     u8 skipped_fuzz;
 
     cull_queue();
@@ -8623,9 +8627,9 @@ int main(int argc, char** argv) {
         seek_to--;
         queue_cur = queue_cur->next;
       }
-
+      // printf("show\n");
       show_stats();
-
+      // printf("res\n");
       if (not_on_tty) {
         ACTF("Entering queue cycle %llu.", queue_cycle);
         fflush(stdout);
@@ -8646,7 +8650,7 @@ int main(int argc, char** argv) {
         sync_fuzzers(use_argv);
 
     }
-
+    // printf("fuzz\n");
     skipped_fuzz = fuzz_one(use_argv);
 
     if (!stop_soon && sync_id && !skipped_fuzz) {
