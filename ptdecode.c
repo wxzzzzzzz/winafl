@@ -782,7 +782,7 @@ inline static int update_coverage_cache(struct coverage_cache_t *coverage_cache,
 
 	if (!current_range->collect) return 0;
 
-	printf("ip: %p\n", (void*)next_ip);
+	// printf("ip: %p\n", (void*)next_ip);
 
 	offset = (uint32_t)(next_ip - current_range->start);
 

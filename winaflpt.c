@@ -1114,6 +1114,22 @@ void on_entrypoint() {
 	child_entrypoint_reached = true;
 }
 
+void load_module() {
+	HMODULE *module_handles = NULL;
+	DWORD num_modules = get_all_modules(&module_handles);
+	for (DWORD i = 0; i < num_modules; i++) {
+		char base_name[MAX_PATH];
+		GetModuleBaseNameA(child_handle, module_handles[i], (LPSTR)(&base_name), sizeof(base_name));
+
+		if (_stricmp(base_name, options.fuzz_module) != 0)
+			continue;
+		printf("%s\n", base_name);
+		if(options.debug_mode) fprintf(debug_log, "Module loaded: %s\n", base_name);
+		on_module_loaded(module_handles[i], base_name);
+	}
+	if(module_handles) free(module_handles);
+}
+
 void break_on_target() {
 	// printf("Entrypoint\n");
 
@@ -1755,20 +1771,28 @@ int run_target_pt(char **argv, uint32_t timeout, char *buf, long fsize) {
 				break;
 			} else if (strcmp(data, "timeout") == 0) {
 				ret = FAULT_TMOUT;
+				break;
 			} 
 		} 
 		
-		if (ret == FAULT_TMOUT) {
-			DWORD exitCode;
-			GetExitCodeProcess(child_handle, &exitCode);
+		// if (ret == FAULT_TMOUT) {
+		// 	DWORD exitCode;
+		// 	GetExitCodeProcess(child_handle, &exitCode);
 			
-			if (exitCode != STILL_ACTIVE) {
-				ret = FAULT_CRASH;
-			}
+		// 	if (exitCode != STILL_ACTIVE) {
+		// 		ret = FAULT_CRASH;
+		// 	}
 
-			break;
-		}
+		// 	break;
+		// }
 	}
+	DWORD exitCode;
+	GetExitCodeProcess(child_handle, &exitCode);
+	
+	if (exitCode != STILL_ACTIVE) {
+		ret = FAULT_CRASH;
+	}
+
 	// printf("ret : %d\n", ret);
 	if (ret == FAULT_CRASH)
 		return ret;
