@@ -40,6 +40,14 @@ class ConnectionParametersHeader:
     AckTimeout: int     # DWORD
     WindowSize: int # WORD
     Reserved: int = 0    # WORD
+
+    def pack(self) -> bytes:
+        fmt = '<4s4sH2s'
+        return struct.pack(fmt,
+                           self.RecoverableAckTimeout,
+                           self.AckTimeout,
+                           self.Reserved,
+                           self.WindowSize)
     
 @dataclass
 class EstablishConnectionHeader:
@@ -101,25 +109,31 @@ class DebugHeader:
                            self.Flags,
                            self.Reserved,
                            self.QueueIdentifier)
-dataclass
+@dataclass
 class UserHeader:
+    SourceQueueManager:bytes
     QueueManagerAddress:bytes            # WORD
     TimeToBeReceived:int                 # DWORD
     SentTime:int
     MessageID:int
     Flags:int
-    DestinationQueue:bytes
-    AdminQueue:bytes
-    ResponseQueue:bytes
-    SourceQueueManager:bytes = b'\xC6\x26\xEA\x11\xE6\xB6\x97\x49\x95\x95\x91\x50\x55\x73\x58\xD1'             # WORD
+    DestinationQueue:bytes 
+    AdminQueue:bytes 
+    ResponseQueue:bytes 
 
-    def __post_init__(self):
-        self.DestinationQueue = self._GetDestinationQueue()
-        self.AdminQueue = self._GetAdminQueue()
-        self.ResponseQueue = self._GetResponseQueue()
-    
     def pack(self) -> bytes:
-        pass
+        fmt = '<16s16s4s4s4s4s'
+        data = struct.pack(fmt,
+                           self.SourceQueueManager,
+                           self.QueueManagerAddress,
+                           self.TimeToBeReceived,
+                           self.SentTime,
+                           self.MessageID,
+                           self.Flags
+                           )
+        data += self.DestinationQueue + self.AdminQueue + self.ResponseQueue
+        return data
+       
 
 @dataclass
 class TransactionHeader:
@@ -166,10 +180,13 @@ class SRMPEnvelopeHeader:
 
 
 class Packet:
-    def __init__(self, fuzz_data, len):
+    def __init__(self, fuzz_data, data, len, dataLen):
         self.fuzz_data = fuzz_data
+        self.data = data
         self.len = len
         self.index = 0
+        self.dataLen = dataLen
+        self.dataIndex = 0
         
     def _GetSize(self, size) -> bytes:
         if (self.index + size) > self.len:
@@ -179,57 +196,68 @@ class Packet:
         self.index += size
         return data
     
+    def _GetData(self, size) -> bytes:
+        if (self.dataIndex + size) > self.dataLen:
+            return None
+        
+        data = self.data[self.dataIndex : self.dataIndex + size]
+        self.dataIndex += size
+        return data
+
+    
     def GetPacket(self):
         baseHeader = self._GetBaseHeader()
-        internalHeader = self._GetInternalHeader(0)
-        internalHeader_pack = internalHeader.pack()
-        establishConnectionHeader = self._GetEstablishConnectionHeader()
-        establishConnectionHeader_pack = establishConnectionHeader.pack()
+        internalHeader = self._GetInternalHeader()
 
-        baseHeader.PacketSize = len(internalHeader_pack) + len(establishConnectionHeader_pack) + 16
-        establishConnection_pack = baseHeader.pack() + internalHeader_pack + establishConnectionHeader_pack
-        
-        return [establishConnection_pack]
+        establishConnectionPack = self._GetEstablishPacket(baseHeader, internalHeader)
+
+        connectionParameterPack = self._GetConnectionParameterPacket(baseHeader, internalHeader)
+        self._GetUserHeader()
+        return [establishConnectionPack, connectionParameterPack]
         
 
     def _GetEstablishPacket(self, baseHeader, internalHeader):
-        Flags = self._GetSize(2)
-        self._SetBits(Flags, 0, 4, 18)
-        
-        return 
-
-        establishConnectionHeader = self._GetEstablishConnectionHeader()
+        flags = internalHeader.Flags
+        internalHeader.Flags = self._SetBits(flags[0], 0, 4, 2) + flags[1:]
         internalHeader_pack = internalHeader.pack()
+        establishConnectionHeader = self._GetEstablishConnectionHeader()
         establishConnectionHeader_pack = establishConnectionHeader.pack()
-        baseHeader.PacketSize = len(internalHeader_pack) + len(establishConnectionHeader_pack)
+        baseHeader.PacketSize = len(internalHeader_pack) + len(establishConnectionHeader_pack) + 16
+        establishConnection_pack = baseHeader.pack() + internalHeader_pack + establishConnectionHeader_pack
+        
+        return establishConnection_pack
 
-        return baseHeader.pack() + internalHeader_pack + establishConnectionHeader_pack
-    
-    def _GetConnectionParameterPacket(self):
-        connectionParametersHeader = self.gen_ConnectionParametersHeader()
-        flags = self.internalHeader.Flags
-        self.internalHeader.Flags = (flags & 0xF0) | 3
+    def _GetConnectionParameterPacket(self, baseHeader, internalHeader):
+        flags = internalHeader.Flags
+        internalHeader.Flags = self._SetBits(flags[0], 0, 4, 3) + flags[1:]
+        internalHeader_pack = internalHeader.pack()
+
+        connectionParametersHeader = self._GetConnectionParametersHeader()
 
         connectionParametersHeader_pack = connectionParametersHeader.pack()
-        self.baseHeader.PacketSize = len(self.internalHeader) + len(connectionParametersHeader_pack) + 16
+        baseHeader.PacketSize = len(internalHeader_pack) + len(connectionParametersHeader_pack) + 16
 
-        connection_pack = self.baseHeader.pack() + self.internalHeader.pack() + connectionParametersHeader_pack.pack()
+        connection_pack = baseHeader.pack() + internalHeader_pack + connectionParametersHeader_pack
 
         return connection_pack
 
+    def _GetUserMessage(self, baseHeader):
+        userHeader = self._GetUserHeader()
+
     def _GetUserHeader(self):
-        SourceQueueManager = self._GetSize(16)
-        QueueManagerAddress = self._GetSize(2)
+        SourceQueueManager = b'\xD1\x58\x73\x55\x50\x91\x95\x95\x49\x97\xB6\xE6\x11\xEA\x26\xC6'
+        QueueManagerAddress = b'\x00' * 16
         TimeToBeReceived = self._GetSize(4)
         SentTime = self._GetSize(4)
         MessageID = self._GetSize(4)
-        Flags = self._GetSize(2)
+        Flags = self._GetSize(4)
 
-        userHeader = UserHeader(SourceQueueManager=SourceQueueManager, QueueManagerAddress=QueueManagerAddress, TimeToBeReceived=TimeToBeReceived, SentTime=SentTime, MessageID=MessageID, Flags=Flags)
-        userHeader.AdminQueue = self._GetAdminQueue(userHeader)
-        userHeader.DestinationQueue = self._GetDestinationQueue(userHeader)
-        userHeader.ResponseQueue = self._GetResponseQueue(userHeader)
-
+        #userHeader = UserHeader(SourceQueueManager=SourceQueueManager, QueueManagerAddress=QueueManagerAddress, TimeToBeReceived=TimeToBeReceived, SentTime=SentTime, MessageID=MessageID, Flags=Flags)
+        DestinationQueue = self._GetDestinationQueue(Flags)
+        AdminQueue = self._GetAdminQueue(Flags)
+        ResponseQueue = self._GetResponseQueue(Flags)
+        userHeader = UserHeader(SourceQueueManager=SourceQueueManager, QueueManagerAddress=QueueManagerAddress, TimeToBeReceived=TimeToBeReceived, SentTime=SentTime, MessageID=MessageID, Flags=Flags, DestinationQueue=DestinationQueue, AdminQueue=AdminQueue, ResponseQueue=ResponseQueue)
+        print(userHeader.pack())
 
     def _GetTransactionHeader(self):
         Flags = self._GetSize(4)
@@ -310,47 +338,56 @@ class Packet:
     def _GetMQFFormatNameElement(self):
         return b'\x00\x01' + b'a' * 16
 
-    def _GetAdminQueue(self, userHeader):
-        aq = self._GetBits(userHeader.Flags, 13, 16)
+    def _GetAdminQueue(self, Flags):
+        print(Flags[1])
+        aq = self._GetBits(Flags[1], 5, 8)
+        print(aq)
         if aq in [2, 3]:
-            return self._GetSize(4)
+            return self._GetData(4)
         elif aq == 5:
-            return self._GetSize(16)
+            return self._GetData(16)
         elif aq == 6:
-            return self._GetSize(20)
+            return self._GetPrivateQueueFormatName()
         elif aq == 7:
-            return self._GetDestinationQueue()
+            return self._GetDirectQueueFormatName()
         else:
-            return None
+            return b''
 
-    def _GetDestinationQueue(self, userHeader):
-        dq = self._GetBits(userHeader.Flags, 10, 13)
+    def _GetDestinationQueue(self, Flags):
+        dq = self._GetBits(Flags[1], 2, 5)
         if dq == 3:
-            return self._GetSize(4)
+            return self._GetData(4)
         elif dq == 5:
-            return self._GetSize(16)
+            return self._GetData(16)
         elif dq == 7:
             return self._GetDirectQueueFormatName()
         else:
-            return None
+            return b''
 
-    def _GetResponseQueue(self, userHeader):
-        dq = self._GetBits(userHeader.Flags, 16, 19)
+    def _GetResponseQueue(self, Flags):
+        dq = self._GetBits(Flags[2], 0, 3)
         if dq in [2, 3, 4]:
-            return self._GetSize(4)
+            return self._GetData(4)
         elif dq == 5:
-            return self._GetSize(16)
+            return self._GetData(16)
         elif dq == 6:
-            return self._GetSize(20)
+            return self._GetPrivateQueueFormatName()
         elif dq == 7:
             return self._GetDestinationQueue()
         else:
-            return None
+            return b''
+    
+    def _GetPrivateQueueFormatName(self):
+        source = b'\xD1\x58\x73\x55\x50\x91\x95\x95\x49\x97\xB6\xE6\x11\xEA\x26\xC6'
+        idt = self._GetData(4)
+        return source + idt
 
     def _GetDirectQueueFormatName(self):
-        size = self._GetSize(2)
-        DirectFormatName = b'a' * int.from_bytes(size, 'little')
-        return size + DirectFormatName
+        length = self._GetData(2)
+        DirectFormatName = self._makeUnicodeStr(int.from_bytes(length, 'little'))
+        size = len(DirectFormatName)
+
+        return struct.pack("<H", size) + DirectFormatName
 
     def _GetBaseHeader(self):
         Reserved = self._GetSize(1)
@@ -358,12 +395,8 @@ class Packet:
         TimeToReachQueue = self._GetSize(4)
         return BaseHeader(Reserved=Reserved, Flags=Flags, TimeToReachQueue=TimeToReachQueue)
     
-    def _GetInternalHeader(self, type):
+    def _GetInternalHeader(self):
         Flags = self._GetSize(2)
-        if type == 0:
-            Flags = self._SetBits(Flags[0], 0, 4, 2) + Flags[1:]
-        elif type == 1:
-            Flags = self._SetBits(Flags[0], 0, 4, 3) + Flags[1:]
         internal = InternalHeader(Flags=Flags)
         return internal
     
@@ -377,13 +410,13 @@ class Packet:
         establishConnectionHeader = EstablishConnectionHeader(TimeStamp=timeStamp, OperatingSystem = OperatingSystem, ClientGuid=ClientGuid, ServerGuid=ServerGuid)
         return establishConnectionHeader
 
-    def GetConnectionParametersHeader(self):
-        connectionParametersHeader = ConnectionParametersHeader()
-        connectionParametersHeader.RecoverableAckTimeout = self._GetSize(4)
-        connectionParametersHeader.AckTimeout = self._GetSize(4)
-        connectionParametersHeader.WindowSize = self._GetSize(2)
+    def _GetConnectionParametersHeader(self):
+        # TODO 调整recoverableAckTimeout 和ackTimeout的大小
+        recoverableAckTimeout = self._GetSize(4)
+        ackTimeout = self._GetSize(4)
+        windowSize = self._GetSize(2)
 
-        return connectionParametersHeader
+        return ConnectionParametersHeader(RecoverableAckTimeout=recoverableAckTimeout, AckTimeout=ackTimeout, WindowSize=windowSize)
     
     def GetMessagePropertiesHeader(self):
         Flags = self._GetSize(1)
@@ -415,11 +448,7 @@ class Packet:
         return (flags >> start) & ((1 << (end - start + 1)) - 1)
 
     def _makeUnicodeStr(self, length):
-        if length % 2 != 0:
-            length += 1
-        
-        size = (length - 1) / 2
-        return text.encode("a" * size) + b"\x00\x00"
+        return ("a" * length).encode("utf-16le") + b"\x00\x00"
 
 def recvfrom_msmq(mq_sock):
     global fuzz_addr
@@ -435,7 +464,8 @@ def recvfrom_msmq(mq_sock):
         recv_sock.sendto(b"timeout", fuzz_addr)
         print(e)
 
-data = b'\xC0\x0b\x00\xFF\xFF\xFF\xFF\x02\x00\x4E\xCA\xDE\x1D\x03'
+header_data = b'\xC0\x0b\x00\xFF\xFF\xFF\xFF\x02\x00\x4E\xCA\xDE\x1D\x03\xD8\x05\x00\x00\xC0\xD4\x01\x00\x40\x00\xFF\xFF\xFF\xFF\x4C\x49\x4F\x52\xee\x08\x00\x00\x00\x1c\x28\x00'
+data = b'\x00\x01\x02\x03' *1024
 # def main():
 #     global fuzz_addr
 #     print("Listening for UDP packets on port 20000 and forwarding to TCP port 1801")
@@ -458,8 +488,8 @@ data = b'\xC0\x0b\x00\xFF\xFF\xFF\xFF\x02\x00\x4E\xCA\xDE\x1D\x03'
 def test():
     # with open("output.bin", "rb") as f:
     #     data = f.read()
-    packet = Packet(data, len(data))
-    # pack = packet.GetPacket()
+    packet = Packet(header_data, data, len(header_data), len(data))
+    pack = packet.GetPacket()
     # buf = pack[0]
     # print(buf)
     # mq_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
