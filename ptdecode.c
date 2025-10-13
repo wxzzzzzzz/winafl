@@ -732,6 +732,8 @@ bool findpsb(unsigned char **data, size_t *size) {
 inline static int update_coverage_map(uint64_t next_ip, int coverage_kind) {
 	uint32_t offset;
 
+	// printf("ip: %p\n", (void*)next_ip);
+
 	if (next_ip < current_range->start) {
 		do {
 			current_range--;
@@ -768,7 +770,7 @@ inline static int update_coverage_cache(struct coverage_cache_t *coverage_cache,
 {
 
 	uint32_t offset;
-
+	// printf("ip: %p\n", (void*)next_ip);
 	if (next_ip < current_range->start) {
 		do {
 			current_range--;
@@ -1062,7 +1064,7 @@ inline static void process_packet(struct pt_packet *packet, int coverage_kind) {
 	default:
 		return;
 	}
-
+	
 	previous_ip = next_ip;
 
 	if (packet->type == ppt_tip) {
@@ -1404,7 +1406,7 @@ void analyze_trace_full_fast(unsigned char *trace_data, size_t trace_size,
 	previous_offset = 0;
 	previous_ip = 0;
 	current_range = &(coverage_ip_ranges[0]);
-
+	
 	struct coverage_cache_t *coverage_cache =
 		(struct coverage_cache_t *)malloc(sizeof(struct coverage_cache_t));
 	tracelet_coverage_init(coverage_cache);

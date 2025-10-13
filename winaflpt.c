@@ -77,6 +77,7 @@ char *argv_to_cmd(char** argv);
 #define DECODER_FULL_REFERENCE 3
 
 static HANDLE child_handle, child_thread_handle;
+static HANDLE target_handle;
 static HANDLE devnul_handle = INVALID_HANDLE_VALUE;
 static int fuzz_iterations_current;
 
@@ -439,6 +440,10 @@ void build_address_ranges() {
 		coverage_ip_ranges[2 * i + 1] = tmp_buf[i];
 		current_address = tmp_buf[i].end + 1;
 	}
+	for (int i = 0; i < num_loaded_modules; i++) {
+		printf("Coverage range: %p - %p\n", (void*)coverage_ip_ranges[2 * i].start, (void*)coverage_ip_ranges[2 * i].end);
+		
+	}
 	coverage_ip_ranges[2 * num_loaded_modules].start = current_address;
 	coverage_ip_ranges[2 * num_loaded_modules].end = 0xFFFFFFFFFFFFFFFFULL;
 	coverage_ip_ranges[2 * num_loaded_modules].collect = 0;
@@ -572,6 +577,22 @@ DWORD get_all_modules(HMODULE **modules) {
 	DWORD hmodules_size;
 	while (true) {
 		if (!EnumProcessModulesEx(child_handle, module_handles, module_handle_storage_size, &hmodules_size, LIST_MODULES_ALL)) {
+			FATAL("EnumProcessModules failed, %x\n", GetLastError());
+		}
+		if (hmodules_size <= module_handle_storage_size) break;
+		module_handle_storage_size *= 2;
+		module_handles = (HMODULE *)realloc(module_handles, module_handle_storage_size);
+	}
+	*modules = module_handles;
+	return hmodules_size / sizeof(HMODULE);
+}
+
+DWORD get_all_target_modules(HMODULE **modules) {
+	DWORD module_handle_storage_size = 1024 * sizeof(HMODULE);
+	HMODULE *module_handles = (HMODULE *)malloc(module_handle_storage_size);
+	DWORD hmodules_size;
+	while (true) {
+		if (!EnumProcessModulesEx(target_handle, module_handles, module_handle_storage_size, &hmodules_size, LIST_MODULES_ALL)) {
 			FATAL("EnumProcessModules failed, %x\n", GetLastError());
 		}
 		if (hmodules_size <= module_handle_storage_size) break;
@@ -776,6 +797,7 @@ void on_coverage_module_loaded(HMODULE module, module_info_t *target_module) {
 
 	target_module->base = module_info.lpBaseOfDll;
 	target_module->size = module_info.SizeOfImage;
+	printf("Collecting coverage for module %s, base %p, size %lx\n", target_module->module_name, target_module->base, target_module->size);
 
 	need_build_ranges = true;
 }
@@ -864,6 +886,38 @@ void add_module_to_section_cache(HMODULE module, char *module_name) {
 	all_modules = loaded_module;
 }
 
+void on_module_loaded_attach_mode(HMODULE module, char *module_name) {
+	MODULEINFO module_info;
+	GetModuleInformation(target_handle, module, &module_info, sizeof(module_info));
+	// printf("In on_module_loaded, name: %s, base: %p\n", module_name, module_info.lpBaseOfDll);
+
+	module_info_t *coverage_module = is_coverage_module(module_name);
+	
+	if (coverage_module) {
+		on_coverage_module_loaded(module, coverage_module);
+	}
+	// else{
+	// 	return;
+	// }
+
+	// if (options.decoder == DECODER_FULL_FAST || options.decoder == DECODER_FULL_REFERENCE) {
+	// 	add_module_to_section_cache(module, module_name);
+	// }
+
+	if (_stricmp(module_name, options.fuzz_module) == 0) {
+		char * fuzz_address = get_fuzz_method_offset(module);
+	
+		if (!fuzz_address) {
+			FATAL("Error determining target method address\n");
+		}
+
+		// printf("Fuzz method address: %p\n", fuzz_address);
+		options.fuzz_address = fuzz_address;
+
+		add_breakpoint(fuzz_address, BREAKPOINT_FUZZMETHOD, NULL, 0);
+	}
+}
+
 // called when a potentialy interesting module gets loaded
 void on_module_loaded(HMODULE module, char *module_name) {
 	MODULEINFO module_info;
@@ -871,26 +925,49 @@ void on_module_loaded(HMODULE module, char *module_name) {
 	// printf("In on_module_loaded, name: %s, base: %p\n", module_name, module_info.lpBaseOfDll);
 
 	module_info_t *coverage_module = is_coverage_module(module_name);
+	
 	if (coverage_module) {
 		on_coverage_module_loaded(module, coverage_module);
 	}
+	// else{
+	// 	return;
+	// }
+
+	// if (options.decoder == DECODER_FULL_FAST || options.decoder == DECODER_FULL_REFERENCE) {
+	// 	add_module_to_section_cache(module, module_name);
+	// }
+
+	if (_stricmp(module_name, options.fuzz_module) == 0) {
+		char * fuzz_address = get_fuzz_method_offset(module);
+	
+		if (!fuzz_address) {
+			FATAL("Error determining target method address\n");
+		}
+
+		// printf("Fuzz method address: %p\n", fuzz_address);
+		options.fuzz_address = fuzz_address;
+
+		add_breakpoint(fuzz_address, BREAKPOINT_FUZZMETHOD, NULL, 0);
+	}
+}
+
+void on_target_module(HMODULE module, char *module_name) {
+	MODULEINFO module_info;
+	GetModuleInformation(child_handle, module, &module_info, sizeof(module_info));
+	// printf("In on_module_loaded, name: %s, base: %p\n", module_name, module_info.lpBaseOfDll);
+
+	module_info_t *coverage_module = is_coverage_module(module_name);
+	
+	if (coverage_module) {
+		on_coverage_module_loaded(module, coverage_module);
+	}
+	// else{
+	// 	return;
+	// }
 
 	if (options.decoder == DECODER_FULL_FAST || options.decoder == DECODER_FULL_REFERENCE) {
 		add_module_to_section_cache(module, module_name);
-	}
-
-	// if (_stricmp(module_name, options.fuzz_module) == 0) {
-	// 	char * fuzz_address = get_fuzz_method_offset(module);
-	
-	// 	if (!fuzz_address) {
-	// 		FATAL("Error determining target method address\n");
-	// 	}
-
-	// 	// printf("Fuzz method address: %p\n", fuzz_address);
-	// 	options.fuzz_address = fuzz_address;
-
-	// 	add_breakpoint(fuzz_address, BREAKPOINT_FUZZMETHOD, NULL, 0);
-	// }
+	}	
 }
 
 void read_stack(void *stack_addr, void **buffer, size_t numitems) {
@@ -1114,21 +1191,35 @@ void on_entrypoint() {
 	child_entrypoint_reached = true;
 }
 
-void load_module() {
+void attach_on_target() {
 	HMODULE *module_handles = NULL;
-	DWORD num_modules = get_all_modules(&module_handles);
+	DWORD num_modules = get_all_target_modules(&module_handles);
 	for (DWORD i = 0; i < num_modules; i++) {
 		char base_name[MAX_PATH];
-		GetModuleBaseNameA(child_handle, module_handles[i], (LPSTR)(&base_name), sizeof(base_name));
-
-		if (_stricmp(base_name, options.fuzz_module) != 0)
-			continue;
-		printf("%s\n", base_name);
+		GetModuleBaseNameA(target_handle, module_handles[i], (LPSTR)(&base_name), sizeof(base_name));
 		if(options.debug_mode) fprintf(debug_log, "Module loaded: %s\n", base_name);
-		on_module_loaded(module_handles[i], base_name);
+		on_target_module(module_handles[i], base_name);
 	}
 	if(module_handles) free(module_handles);
+
+	child_entrypoint_reached = true;
 }
+
+// void load_module() {
+// 	HMODULE *module_handles = NULL;
+// 	DWORD num_modules = get_all_modules(&module_handles);
+// 	for (DWORD i = 0; i < num_modules; i++) {
+// 		char base_name[MAX_PATH];
+// 		GetModuleBaseNameA(child_handle, module_handles[i], (LPSTR)(&base_name), sizeof(base_name));
+
+// 		if (_stricmp(base_name, options.fuzz_module) != 0)
+// 			continue;
+// 		printf("%s\n", base_name);
+// 		if(options.debug_mode) fprintf(debug_log, "Module loaded: %s\n", base_name);
+// 		on_module_loaded(module_handles[i], base_name);
+// 	}
+// 	if(module_handles) free(module_handles);
+// }
 
 void break_on_target() {
 	// printf("Entrypoint\n");
@@ -1180,7 +1271,10 @@ int handle_breakpoint(void *address, DWORD thread_id) {
 				on_entrypoint();
 				break;
 			case BREAKPOINT_MODULELOADED:
-				on_module_loaded((HMODULE)current->module_base, current->module_name);
+				if (attach)
+					on_module_loaded_attach_mode((HMODULE)current->module_base, current->module_name);
+				else	
+					on_module_loaded((HMODULE)current->module_base, current->module_name);
 				break;
 			case BREAKPOINT_FUZZMETHOD:
 				printf("Fuzz method reached\n");
@@ -1294,19 +1388,20 @@ int debug_loop()
 
 		case CREATE_PROCESS_DEBUG_EVENT: 
 			// add a brekpoint to the process entrypoint
-			if (attach) {
-				printf("Process entrypoint reached\n");
-				break_on_target();
-				set_bp = 1;
-				if (dll_run_ptr) {
-					printf("Running initialization function %p\n", dll_run_ptr);
-					dll_run_ptr(input_buf, input_length, 0);
-				}
+
+			// if (attach) {
+			// 	printf("Process entrypoint reached\n");
+			// 	break_on_target();
+			// 	set_bp = 1;
+			// 	if (dll_run_ptr) {
+			// 		printf("Running initialization function %p\n", dll_run_ptr);
+			// 		dll_run_ptr(input_buf, input_length, 0);
+			// 	}
 						
-			} else {
-				void *entrypoint = get_entrypoint(DebugEv->u.CreateProcessInfo.lpBaseOfImage);
-				add_breakpoint(entrypoint, BREAKPOINT_ENTRYPOINT, NULL, 0);
-			}
+			// } else {
+			void *entrypoint = get_entrypoint(DebugEv->u.CreateProcessInfo.lpBaseOfImage);
+			add_breakpoint(entrypoint, BREAKPOINT_ENTRYPOINT, NULL, 0);
+			// }
 			CloseHandle(DebugEv->u.CreateProcessInfo.hFile);
 			break;
 
@@ -1510,14 +1605,14 @@ void start_process_attach() {
     // }
 
     // 2) Open process handle with needed rights
-    child_handle = OpenProcess(
+    target_handle = OpenProcess(
         PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_CREATE_THREAD | PROCESS_SUSPEND_RESUME | PROCESS_TERMINATE | PROCESS_VM_OPERATION,
         FALSE,
         attachpid
     );
-    if (child_handle == NULL) {
+    if (target_handle == NULL) {
         DWORD gle = GetLastError();
-        CloseHandle(child_handle);
+        CloseHandle(target_handle);
 		FATAL("OpenProcess(%u) failed, GLE=%d.\n", attachpid, gle);
     }
         
@@ -1529,13 +1624,12 @@ void start_process_attach() {
 
     // 5) 检测 WOW64 状态（和 CreateProcess 路径相同）
     BOOL wow64current = FALSE, wow64remote = FALSE;
-    if (!IsWow64Process(child_handle, &wow64remote)) {
+    if (!IsWow64Process(target_handle, &wow64remote)) {
         FATAL("IsWow64Process failed");
     }
     if (wow64remote) {
         wow64_target = 1;
         child_ptr_size = 4;
-        // 你的 options.callconv 字段名可能不同，替换为实际字段
         if (options.callconv == CALLCONV_DEFAULT) {
             options.callconv = CALLCONV_CDECL;
         }
@@ -1544,7 +1638,6 @@ void start_process_attach() {
         FATAL("IsWow64Process failed");
     }
     if (wow64current && wow64remote  && (options.decoder == DECODER_FULL_REFERENCE || options.decoder == DECODER_FULL_FAST) ) {
-        // 根据你原来代码里对 decoder 的检查，保持一致
         FATAL("For full Intel PT decoding on 64-bit windows, you must use a 64-bit WinAFL build even on 32-bit targets");
     }
 
@@ -1695,40 +1788,41 @@ int run_target_pt(char **argv, uint32_t timeout, char *buf, long fsize) {
 	input_buf = buf;
 	input_length = fsize;
 
-	if (!child_handle) {
-		if (dll_init_ptr) {
-			if (!dll_init_ptr())
-				FATAL("User-defined custom initialization routine returned 0");
-		}
+	if (attach &&!target_handle) {
+		if (!dll_init_ptr)
+			FATAL("User-defined custom initialization routine required for attach mode");
+		
+		if (!dll_init_ptr())
+			FATAL("User-defined custom initialization routine returned 0");
 
-		if (attach) {
-			start_process_attach();
-			on_entrypoint();
-		} else {
-			char *cmd = argv_to_cmd(argv);
-			start_process(cmd);
-			ck_free(cmd);
-		}
+		start_process_attach();
+		attach_on_target();	
+	}
+
+	if (!child_handle) {
+		char *cmd = argv_to_cmd(argv);
+		start_process(cmd);
+		ck_free(cmd);
 		// wait until the target method is reached
 		dbg_timeout_time = get_cur_time() + timeout;
-		// debugger_status = debug_loop();
+		debugger_status = debug_loop();
 
-		// if (debugger_status != DEBUGGER_FUZZMETHOD_REACHED) {
-		// 	switch (debugger_status) {
-		// 	case DEBUGGER_CRASHED:
-		// 		FATAL("Process crashed before reaching the target method\n");
-		// 		break;
-		// 	case DEBUGGER_HANGED:
-		// 		FATAL("Process hanged before reaching the target method\n");
-		// 		break;
-		// 	case DEBUGGER_PROCESS_EXIT:
-		// 		FATAL("Process exited before reaching the target method\n");
-		// 		break;
-		// 	default:
-		// 		FATAL("An unknown problem occured before reaching the target method\n");
-		// 		break;
-		// 	}
-		// }
+		if (debugger_status != DEBUGGER_FUZZMETHOD_REACHED) {
+			switch (debugger_status) {
+			case DEBUGGER_CRASHED:
+				FATAL("Process crashed before reaching the target method\n");
+				break;
+			case DEBUGGER_HANGED:
+				FATAL("Process hanged before reaching the target method\n");
+				break;
+			case DEBUGGER_PROCESS_EXIT:
+				FATAL("Process exited before reaching the target method\n");
+				break;
+			default:
+				FATAL("An unknown problem occured before reaching the target method\n");
+				break;
+			}
+		}
 
 		fuzz_iterations_current = 0;
 	}
