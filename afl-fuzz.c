@@ -2281,7 +2281,7 @@ char *argv_to_cmd(char** argv) {
 
   for (i = 0; argv[i]; i++)
     len += ArgvQuote(argv[i], NULL) + 1;
-  
+
   if(!len) FATAL("Error creating command line");
 
   buf = ret = ck_alloc(len);
@@ -2851,10 +2851,10 @@ static u8 run_target(char** argv, u32 timeout) {
     int result;
     long fsize;
 
-    char *buf = get_test_case(&fsize);
-		// return run_target_pt(argv, timeout, drattach_identifier);
-    result = run_target_pt(argv, timeout, buf, fsize);
-    free(buf);
+    // char *buf = get_test_case(&fsize);
+		return run_target_pt(argv, timeout);
+    // result = run_target_pt(argv, timeout, buf, fsize);
+    // free(buf);
     return result;
 	}
 #endif
@@ -8527,7 +8527,7 @@ int main(int argc, char** argv) {
     FATAL("AFL_DUMB_FORKSRV and AFL_NO_FORKSRV are mutually exclusive");
 
   save_cmdline(argc, argv);
-  // if (!use_intelpt) 
+  // if (!use_intelpt)
   fix_up_banner(argv[optind]);
     
   check_if_tty();
@@ -8577,19 +8577,19 @@ int main(int argc, char** argv) {
 
   if (!timeout_given) find_timeout();
 
-  if (!use_intelpt) 
-    detect_file_args(argv + optind + 1);
+  // if (!use_intelpt) 
+  detect_file_args(argv + optind + 1);
 
   if (!out_file) setup_stdio_file();
 
-  if (!use_intelpt) 
-    check_binary(argv[optind]);
+  //if (!use_intelpt) 
+  check_binary(argv[optind]);
 
   start_time = get_cur_time();
 
   if (qemu_mode)
     use_argv = get_qemu_argv(argv[0], argv + optind, argc - optind);
-  else if (!use_intelpt) 
+  else
     use_argv = argv + optind;
 
   perform_dry_run(use_argv);
