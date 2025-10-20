@@ -442,7 +442,6 @@ void build_address_ranges() {
 	}
 	for (int i = 0; i < num_loaded_modules; i++) {
 		printf("Coverage range: %p - %p\n", (void*)coverage_ip_ranges[2 * i].start, (void*)coverage_ip_ranges[2 * i].end);
-		
 	}
 	coverage_ip_ranges[2 * num_loaded_modules].start = current_address;
 	coverage_ip_ranges[2 * num_loaded_modules].end = 0xFFFFFFFFFFFFFFFFULL;
@@ -510,7 +509,7 @@ bool collect_thread_trace(PIPT_TRACE_HEADER traceHeader) {
 			trace_size = 0;
 			trace_buffer_overflow = true;
 
-			printf("Warning: Trace buffer overflowed, trace will be truncated\n");
+			//printf("Warning: Trace buffer overflowed, trace will be truncated\n");
 			if (options.debug_mode) fprintf(debug_log, "Trace buffer overflowed, trace will be truncated\n");
 
 			char *trailing_data = traceHeader->Trace + traceHeader->RingBufferOffset;
@@ -531,7 +530,7 @@ bool collect_thread_trace(PIPT_TRACE_HEADER traceHeader) {
 		size_t trailing_size = traceHeader->TraceSize - traceHeader->RingBufferOffset;
 		if (findpsb(&trailing_data, &trailing_size)) {
 			trace_buffer_overflow = true;
-			printf("Warning: Trace buffer overflowed, trace will be truncated\n");
+			// printf("Warning: Trace buffer overflowed, trace will be truncated\n");
 			if (options.debug_mode) fprintf(debug_log, "Trace buffer overflowed, trace will be truncated\n");
 			append_trace_data(trailing_data, trailing_size);
 		}
@@ -791,9 +790,9 @@ module_info_t *get_intersecting_module(char *module_name, void *base, DWORD size
 }
 
 
-void on_coverage_module_loaded(HMODULE module, module_info_t *target_module) {
+void on_coverage_module_loaded(HMODULE module, module_info_t *target_module, HANDLE handle) {
 	MODULEINFO module_info;
-	GetModuleInformation(child_handle, module, &module_info, sizeof(module_info));
+	GetModuleInformation(handle, module, &module_info, sizeof(module_info));
 
 	target_module->base = module_info.lpBaseOfDll;
 	target_module->size = module_info.SizeOfImage;
@@ -915,7 +914,7 @@ void on_module_loaded(HMODULE module, char *module_name) {
 		module_info_t *coverage_module = is_coverage_module(module_name);
 		
 		if (coverage_module) {
-			on_coverage_module_loaded(module, coverage_module);
+			on_coverage_module_loaded(module, coverage_module, child_handle);
 		}
 		// else{
 		// 	return;
@@ -948,7 +947,7 @@ void on_target_module(HMODULE module, char *module_name) {
 	module_info_t *coverage_module = is_coverage_module(module_name);
 	
 	if (coverage_module) {
-		on_coverage_module_loaded(module, coverage_module);
+		on_coverage_module_loaded(module, coverage_module, target_handle);
 	}
 	// else{
 	// 	return;
@@ -1529,11 +1528,38 @@ void wait_process_exit()
 //     CloseHandle(hSnap);
 // }
 
+void enableDebugPriv()
+{
+    HANDLE hToken;
+    LUID sedebugnameValue;
+    TOKEN_PRIVILEGES tkp;
+ 
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken))
+    {
+        return;
+    }
+ 
+    if (!LookupPrivilegeValue(NULL, SE_DEBUG_NAME, &sedebugnameValue))
+    {
+        CloseHandle(hToken);
+        return;
+    }
+    tkp.PrivilegeCount = 1;
+    tkp.Privileges[0].Luid = sedebugnameValue;
+    tkp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    if (!AdjustTokenPrivileges(hToken, FALSE, &tkp, sizeof tkp, NULL, NULL))
+    {
+        CloseHandle(hToken);
+        return;
+    }
+}
+
 void start_process_attach() {
     HANDLE hJob = NULL;
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION job_limit;
     BOOL inherit_handles = TRUE;
 
+	enableDebugPriv();
     breakpoints = NULL;
 
     if (sinkhole_stds && devnul_handle == INVALID_HANDLE_VALUE) {
@@ -1770,6 +1796,8 @@ int run_target_pt(char **argv, uint32_t timeout) {
 	int ret = FAULT_NONE;
 	// input_buf = buf;
 	// input_length = fsize;
+
+	// printf("argv[1]: %s\n", argv[1]);
 
 	if (attach &&!target_handle) {
 		if (dll_init_ptr){
